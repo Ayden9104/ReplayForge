@@ -52,46 +52,44 @@ impl eframe::App for ReplayForge {
                 }
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.page {
-                Page::Home => {
-                    ui.heading("Home");
-                    ui.separator();
+        egui::CentralPanel::default().show(ctx, |ui| match self.page {
+            Page::Home => {
+                ui.heading("Home");
+                ui.separator();
 
-                    let status = if self.replay_running {
-                        "Replay is running"
-                    } else {
-                        "Replay is stopped"
-                    };
+                let status = if self.replay_running {
+                    "Replay is running"
+                } else {
+                    "Replay is stopped"
+                };
 
-                    ui.label(status);
-                    ui.add_space(10.0);
+                ui.label(status);
+                ui.add_space(10.0);
 
-                    let button_text = if self.replay_running {
-                        "Stop Replay"
-                    } else {
-                        "Start Replay"
-                    };
+                let button_text = if self.replay_running {
+                    "Stop Replay"
+                } else {
+                    "Start Replay"
+                };
 
-                    if ui
-                        .add_sized([200.0, 40.0], egui::Button::new(button_text))
-                        .clicked()
-                    {
-                        self.replay_running = !self.replay_running;
-                    }
+                if ui
+                    .add_sized([200.0, 40.0], egui::Button::new(button_text))
+                    .clicked()
+                {
+                    self.replay_running = !self.replay_running;
                 }
+            }
 
-                Page::Clips => {
-                    ui.heading("Recent Clips");
-                    ui.separator();
-                    ui.label("No clips yet.");
-                }
+            Page::Clips => {
+                ui.heading("Recent Clips");
+                ui.separator();
+                ui.label("No clips yet.");
+            }
 
-                Page::Settings => {
-                    ui.heading("Settings");
-                    ui.separator();
-                    ui.label("Settings coming soon!");
-                }
+            Page::Settings => {
+                ui.heading("Settings");
+                ui.separator();
+                ui.label("Settings coming soon!");
             }
         });
     }
