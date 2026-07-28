@@ -1,7 +1,8 @@
+use chrono::Local;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 #[derive(Default)]
 pub struct Recorder {
@@ -151,12 +152,9 @@ impl Recorder {
         newest.map(|(path, _)| path)
     }
     fn rename_clip(path: PathBuf) {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = Local::now();
 
-        let new_name = format!("ReplayForge_{timestamp}.mp4");
+        let new_name = format!("ReplayForge_{}.mp4", now.format("%Y-%m-%d_%I-%M-%p"));
 
         let new_path = path.parent().unwrap().join(new_name);
 
