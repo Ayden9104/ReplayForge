@@ -2,6 +2,7 @@ use crate::recorder::Recorder;
 use eframe::egui;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 #[derive(PartialEq)]
 enum Page {
@@ -98,34 +99,43 @@ impl eframe::App for ReplayForge {
 
                 match fs::read_dir(&clips_folder) {
                     Ok(entries) => {
-                        let mut clip_names: Vec<String> = entries
+                        let mut clips: Vec<PathBuf> = entries
                             .filter_map(Result::ok)
-                            .filter_map(|entry| {
-                                let path = entry.path();
-
-                                let is_mp4 = path
-                                    .extension()
+                            .map(|entry| entry.path())
+                            .filter(|path| {
+                                path.extension()
                                     .and_then(|extension| extension.to_str())
-                                    .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"));
-
-                                if is_mp4 {
-                                    path.file_name()
-                                        .and_then(|name| name.to_str())
-                                        .map(String::from)
-                                } else {
-                                    None
-                                }
+                                    .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
                             })
                             .collect();
 
-                        clip_names.sort();
-                        clip_names.reverse();
+                        clips.sort();
+                        clips.reverse();
 
-                        if clip_names.is_empty() {
+                        if clips.is_empty() {
                             ui.label("No clips yet.");
                         } else {
-                            for clip_name in clip_names {
-                                ui.label(clip_name);
+                            for clip_path in clips {
+                                let clip_name = clip_path
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or("Unknown clip");
+
+                                ui.horizontal(|ui| {
+                                    ui.label(clip_name);
+
+                                    if ui.button("Open").clicked() {
+                                        let result = Command::new("flatpak-spawn")
+                                            .arg("--host")
+                                            .arg("xdg-open")
+                                            .arg(&clip_path)
+                                            .spawn();
+
+                                        if let Err(error) = result {
+                                            eprintln!("Failed to open clip: {error}");
+                                        }
+                                    }
+                                });
                             }
                         }
                     }
