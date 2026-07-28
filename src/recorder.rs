@@ -93,7 +93,9 @@ impl Recorder {
 
                 if let Some(clip) = Self::find_latest_clip() {
                     println!("Latest clip: {:?}", clip);
-                    Self::rename_clip(clip);
+
+                    let renamed_clip = Self::rename_clip(clip);
+                    Self::generate_thumbnail(&renamed_clip);
                 }
             }
             Ok(status) => {
@@ -151,7 +153,7 @@ impl Recorder {
 
         newest.map(|(path, _)| path)
     }
-    fn rename_clip(path: PathBuf) {
+    fn rename_clip(path: PathBuf) -> PathBuf {
         let now = Local::now();
 
         let new_name = format!("ReplayForge_{}.mp4", now.format("%Y-%m-%d_%I-%M-%p"));
@@ -160,8 +162,38 @@ impl Recorder {
 
         if let Err(error) = fs::rename(&path, &new_path) {
             eprintln!("Failed to rename clip: {error}");
+            path
         } else {
             println!("Clip renamed: {:?}", new_path);
+            new_path
+        }
+    }
+    fn generate_thumbnail(path: &PathBuf) {
+        let thumbnail = path.with_extension("png");
+
+        let result = Command::new("ffmpeg")
+            .args([
+                "-i",
+                path.to_str().unwrap(),
+                "-frames:v",
+                "1",
+                "-update",
+                "1",
+                "-y",
+                thumbnail.to_str().unwrap(),
+            ])
+            .status();
+
+        match result {
+            Ok(status) if status.success() => {
+                println!("Thumbnail created: {:?}", thumbnail);
+            }
+            Ok(status) => {
+                eprintln!("Thumbnail generation failed: {status}");
+            }
+            Err(error) => {
+                eprintln!("Failed to run ffmpeg: {error}");
+            }
         }
     }
 }
