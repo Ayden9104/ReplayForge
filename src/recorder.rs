@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Default)]
 pub struct Recorder {
@@ -92,6 +92,7 @@ impl Recorder {
 
                 if let Some(clip) = Self::find_latest_clip() {
                     println!("Latest clip: {:?}", clip);
+                    Self::rename_clip(clip);
                 }
             }
             Ok(status) => {
@@ -148,5 +149,21 @@ impl Recorder {
         }
 
         newest.map(|(path, _)| path)
+    }
+    fn rename_clip(path: PathBuf) {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let new_name = format!("ReplayForge_{timestamp}.mp4");
+
+        let new_path = path.parent().unwrap().join(new_name);
+
+        if let Err(error) = fs::rename(&path, &new_path) {
+            eprintln!("Failed to rename clip: {error}");
+        } else {
+            println!("Clip renamed: {:?}", new_path);
+        }
     }
 }
