@@ -31,7 +31,7 @@ impl Recorder {
                 "-k",
                 "h264",
                 "-o",
-                "/var/home/ayden9104/Videos/ReplayForge/replay.mp4",
+                "/var/home/ayden9104/Videos/ReplayForge",
             ])
             .spawn();
 
