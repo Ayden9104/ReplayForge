@@ -1,4 +1,7 @@
+use std::fs;
+use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::time::SystemTime;
 
 #[derive(Default)]
 pub struct Recorder {
@@ -86,6 +89,10 @@ impl Recorder {
         match result {
             Ok(status) if status.success() => {
                 println!("Clip saved");
+
+                if let Some(clip) = Self::find_latest_clip() {
+                    println!("Latest clip: {:?}", clip);
+                }
             }
             Ok(status) => {
                 eprintln!("Failed to save clip: {status}");
@@ -108,5 +115,38 @@ impl Recorder {
         } else {
             false
         }
+    }
+    fn find_latest_clip() -> Option<PathBuf> {
+        let folder = PathBuf::from("/var/home/ayden9104/Videos/ReplayForge");
+
+        let mut newest: Option<(PathBuf, SystemTime)> = None;
+
+        if let Ok(entries) = fs::read_dir(folder) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+
+                let is_mp4 = path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"));
+
+                if !is_mp4 {
+                    continue;
+                }
+
+                if let Ok(metadata) = fs::metadata(&path) {
+                    if let Ok(modified) = metadata.modified() {
+                        match &newest {
+                            Some((_, newest_time)) if modified <= *newest_time => {}
+                            _ => {
+                                newest = Some((path, modified));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        newest.map(|(path, _)| path)
     }
 }
