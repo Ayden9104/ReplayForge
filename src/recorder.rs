@@ -73,7 +73,28 @@ impl Recorder {
             }
         }
     }
+    pub fn save_clip(&self) {
+        if self.process.is_none() {
+            eprintln!("Cannot save clip: replay buffer is not running");
+            return;
+        }
 
+        let result = Command::new("flatpak-spawn")
+            .args(["--host", "pkill", "-SIGUSR1", "-f", "^gpu-screen-recorder"])
+            .status();
+
+        match result {
+            Ok(status) if status.success() => {
+                println!("Clip saved");
+            }
+            Ok(status) => {
+                eprintln!("Failed to save clip: {status}");
+            }
+            Err(error) => {
+                eprintln!("Failed to run save command: {error}");
+            }
+        }
+    }
     pub fn is_running(&mut self) -> bool {
         if let Some(process) = self.process.as_mut() {
             match process.try_wait() {
