@@ -1,4 +1,5 @@
 mod app;
+mod recorder;
 
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions::default();

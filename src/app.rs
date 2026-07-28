@@ -1,3 +1,4 @@
+use crate::recorder::Recorder;
 use eframe::egui;
 
 #[derive(PartialEq)]
@@ -8,14 +9,14 @@ enum Page {
 }
 
 pub struct ReplayForge {
-    replay_running: bool,
+    recorder: Recorder,
     page: Page,
 }
 
 impl Default for ReplayForge {
     fn default() -> Self {
         Self {
-            replay_running: false,
+            recorder: Recorder::default(),
             page: Page::Home,
         }
     }
@@ -47,7 +48,7 @@ impl eframe::App for ReplayForge {
                 ui.heading("Home");
                 ui.separator();
 
-                let status = if self.replay_running {
+                let status = if self.recorder.is_running() {
                     "Replay is running"
                 } else {
                     "Replay is stopped"
@@ -56,7 +57,7 @@ impl eframe::App for ReplayForge {
                 ui.label(status);
                 ui.add_space(10.0);
 
-                let button_text = if self.replay_running {
+                let button_text = if self.recorder.is_running() {
                     "Stop Replay"
                 } else {
                     "Start Replay"
@@ -66,7 +67,11 @@ impl eframe::App for ReplayForge {
                     .add_sized([200.0, 40.0], egui::Button::new(button_text))
                     .clicked()
                 {
-                    self.replay_running = !self.replay_running;
+                    if self.recorder.is_running() {
+                        self.recorder.stop();
+                    } else {
+                        self.recorder.start();
+                    }
                 }
             }
 
