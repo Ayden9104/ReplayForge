@@ -1,13 +1,18 @@
 //! ReplayForge egui application shell (home, clips, settings, hotkeys).
+use crate::clips::{extract_filmstrip_jpeg, extract_frame_png, filmstrip_frame_count, trim_clip};
 use crate::config::{
     Backend, Config, SystemAudioMode, codec_choices, hotkey_choices, path_display, quality_choices,
     set_autostart,
 };
-use crate::detect::{Detection, friendly_audio_app_label, probe_clip_meta};
+use crate::detect::{
+    Detection, clip_duration_secs, format_duration, friendly_audio_app_label, probe_clip_meta,
+};
 use crate::host::{notify_desktop, open_path};
 use crate::hotkeys::HotkeyService;
 use crate::recorder::Recorder;
+use crate::theme;
 use crate::tray::{TrayCommand, TrayHandle};
+use crate::trim_playback::{TrimFrame, TrimPlayback};
 use eframe::egui;
 use std::collections::HashMap;
 use std::fs;
@@ -22,6 +27,7 @@ enum Page {
     Home,
     Clips,
     Settings,
+    Trim,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +47,22 @@ struct RenameState {
     text: String,
 }
 
+#[derive(Clone)]
+struct TrimState {
+    path: PathBuf,
+    duration_secs: f64,
+    start_secs: f64,
+    end_secs: f64,
+    preview_secs: f64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TrimHandle {
+    Start,
+    End,
+    Playhead,
+}
+
 pub struct ReplayForge {
     config: Config,
     recorder: Arc<Mutex<Recorder>>,
@@ -58,6 +80,23 @@ pub struct ReplayForge {
     quit_requested: bool,
     saving: bool,
     save_rx: Option<Receiver<Result<PathBuf, String>>>,
+    trim: Option<TrimState>,
+    trimming: bool,
+    trim_rx: Option<Receiver<Result<PathBuf, String>>>,
+    trim_preview_rx: Option<Receiver<Result<(f64, Vec<u8>), String>>>,
+    trim_preview_pending: bool,
+    trim_preview_last_request: Instant,
+    trim_preview_texture: Option<egui::TextureHandle>,
+    trim_loaded_preview: Option<f64>,
+    trim_preview_error: Option<String>,
+    trim_drag_handle: Option<TrimHandle>,
+    trim_playback: Option<TrimPlayback>,
+    trim_play_start: Option<Instant>,
+    trim_filmstrip_texture: Option<egui::TextureHandle>,
+    trim_filmstrip_rx: Option<Receiver<Result<Vec<u8>, String>>>,
+    trim_filmstrip_pending: bool,
+    trim_filmstrip_width: f32,
+    trim_filmstrip_target_width: f32,
     clip_sort: ClipSort,
     clip_filter: String,
 }
@@ -89,7 +128,7 @@ impl ReplayForge {
         // Sync autostart file with config on launch.
         let _ = set_autostart(config.autostart);
 
-        Self {
+        let mut app = Self {
             config,
             recorder: Arc::new(Mutex::new(Recorder::default())),
             page: Page::Home,
@@ -106,9 +145,32 @@ impl ReplayForge {
             quit_requested: false,
             saving: false,
             save_rx: None,
+            trim: None,
+            trimming: false,
+            trim_rx: None,
+            trim_preview_rx: None,
+            trim_preview_pending: false,
+            trim_preview_last_request: Instant::now(),
+            trim_preview_texture: None,
+            trim_loaded_preview: None,
+            trim_preview_error: None,
+            trim_drag_handle: None,
+            trim_playback: None,
+            trim_play_start: None,
+            trim_filmstrip_texture: None,
+            trim_filmstrip_rx: None,
+            trim_filmstrip_pending: false,
+            trim_filmstrip_width: 0.0,
+            trim_filmstrip_target_width: 0.0,
             clip_sort: ClipSort::Newest,
             clip_filter: String::new(),
+        };
+
+        if app.config.auto_start_replay && !app.show_first_run {
+            app.start_replay();
         }
+
+        app
     }
 
     fn toast(&mut self, message: impl Into<String>) {
@@ -226,6 +288,587 @@ impl ReplayForge {
         }
     }
 
+    fn open_trim(&mut self, path: PathBuf) {
+        let Some(duration) = clip_duration_secs(&path) else {
+            self.toast("Could not read clip duration for trim");
+            return;
+        };
+        if duration < 0.5 {
+            self.toast("Clip is too short to trim");
+            return;
+        }
+        self.clear_trim_previews();
+        self.trim = Some(TrimState {
+            path,
+            duration_secs: duration,
+            start_secs: 0.0,
+            end_secs: duration,
+            preview_secs: 0.0,
+        });
+        self.trim_preview_last_request = Instant::now() - Duration::from_millis(200);
+        self.trim_preview_error = None;
+        self.page = Page::Trim;
+        self.trim_filmstrip_width = 0.0;
+        self.trim_filmstrip_target_width = 0.0;
+    }
+
+    fn schedule_trim_filmstrip(&mut self, timeline_width: f32) {
+        let Some(state) = &self.trim else {
+            return;
+        };
+        let path = state.path.clone();
+        let duration = state.duration_secs;
+        let frame_count = filmstrip_frame_count(timeline_width);
+        self.trim_filmstrip_target_width = timeline_width;
+        let (tx, rx) = mpsc::channel();
+        self.trim_filmstrip_rx = Some(rx);
+        self.trim_filmstrip_pending = true;
+
+        thread::spawn(move || {
+            let result = extract_filmstrip_jpeg(&path, duration, frame_count);
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_trim_filmstrip(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.trim_filmstrip_rx {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.trim_filmstrip_rx = None;
+                    self.trim_filmstrip_pending = false;
+                    match result {
+                        Ok(jpeg) => {
+                            if let Some(tex) = Self::load_trim_texture(ctx, "trim_filmstrip", &jpeg)
+                            {
+                                self.trim_filmstrip_texture = Some(tex);
+                                self.trim_filmstrip_width = self.trim_filmstrip_target_width;
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("Filmstrip: {error}");
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.trim_filmstrip_rx = None;
+                    self.trim_filmstrip_pending = false;
+                }
+            }
+        }
+    }
+
+    fn stop_trim_playback(&mut self) {
+        if let Some(mut playback) = self.trim_playback.take() {
+            playback.stop();
+        }
+        self.trim_play_start = None;
+    }
+
+    fn trim_is_playing(&self) -> bool {
+        self.trim_playback.as_ref().is_some_and(|pb| pb.is_active())
+    }
+
+    fn toggle_trim_playback(&mut self) {
+        if self.trim_is_playing() {
+            self.stop_trim_playback();
+            return;
+        }
+        let Some(state) = self.trim.clone() else {
+            return;
+        };
+        if state.end_secs <= state.start_secs {
+            self.toast("Invalid trim range");
+            return;
+        }
+        match TrimPlayback::start(&state.path, state.start_secs, state.end_secs) {
+            Ok(playback) => {
+                if !playback.audio_enabled {
+                    self.toast("Audio unavailable — playing video only");
+                }
+                self.trim_play_start = Some(Instant::now());
+                self.trim_playback = Some(playback);
+            }
+            Err(error) => self.toast(error),
+        }
+    }
+
+    fn cancel_trim(&mut self) {
+        if self.trimming {
+            return;
+        }
+        self.trim = None;
+        self.clear_trim_previews();
+        self.page = Page::Clips;
+    }
+
+    fn clear_trim_previews(&mut self) {
+        self.stop_trim_playback();
+        self.trim_preview_texture = None;
+        self.trim_loaded_preview = None;
+        self.trim_preview_rx = None;
+        self.trim_preview_pending = false;
+        self.trim_preview_error = None;
+        self.trim_drag_handle = None;
+        self.trim_filmstrip_texture = None;
+        self.trim_filmstrip_rx = None;
+        self.trim_filmstrip_pending = false;
+        self.trim_filmstrip_width = 0.0;
+        self.trim_filmstrip_target_width = 0.0;
+    }
+
+    fn trim_preview_stale(&self) -> bool {
+        let Some(state) = &self.trim else {
+            return false;
+        };
+        match self.trim_loaded_preview {
+            None => true,
+            Some(loaded) => (loaded - state.preview_secs).abs() > 0.05,
+        }
+    }
+
+    fn schedule_trim_preview(&mut self) {
+        if self.trim.is_none() || self.trim_preview_pending || self.trim_is_playing() {
+            return;
+        }
+        if Instant::now().duration_since(self.trim_preview_last_request)
+            < Duration::from_millis(200)
+        {
+            return;
+        }
+        if !self.trim_preview_stale() {
+            return;
+        }
+        let Some(state) = self.trim.clone() else {
+            return;
+        };
+        let time_secs = state.preview_secs;
+        let path = state.path.clone();
+        let (tx, rx) = mpsc::channel();
+        self.trim_preview_rx = Some(rx);
+        self.trim_preview_pending = true;
+        self.trim_preview_last_request = Instant::now();
+
+        thread::spawn(move || {
+            let result = extract_frame_png(&path, time_secs).map(|png| (time_secs, png));
+            let _ = tx.send(result);
+        });
+    }
+
+    fn load_trim_texture(ctx: &egui::Context, id: &str, png: &[u8]) -> Option<egui::TextureHandle> {
+        let img = image::load_from_memory(png).ok()?;
+        let rgba = img.to_rgba8();
+        let size = [rgba.width() as usize, rgba.height() as usize];
+        Some(ctx.load_texture(
+            id,
+            egui::ColorImage::from_rgba_unmultiplied(size, &rgba),
+            Default::default(),
+        ))
+    }
+
+    fn load_trim_texture_rgba(
+        ctx: &egui::Context,
+        id: &str,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Option<egui::TextureHandle> {
+        let size = [width as usize, height as usize];
+        Some(ctx.load_texture(
+            id,
+            egui::ColorImage::from_rgba_unmultiplied(size, rgba),
+            Default::default(),
+        ))
+    }
+
+    fn poll_trim_playback(&mut self, ctx: &egui::Context) {
+        if self.trim_playback.is_none() {
+            return;
+        }
+
+        let elapsed = self
+            .trim_play_start
+            .map(|start| Instant::now().duration_since(start).as_secs_f64())
+            .unwrap_or(0.0);
+
+        let should_stop = {
+            let Some(playback) = &self.trim_playback else {
+                return;
+            };
+            elapsed >= playback.selection_secs
+        };
+
+        if should_stop {
+            self.stop_trim_playback();
+            return;
+        }
+
+        if let Some(playback) = &self.trim_playback {
+            if let Some(state) = &mut self.trim {
+                state.preview_secs = (playback.start_secs + elapsed)
+                    .min(playback.start_secs + playback.selection_secs);
+            }
+
+            let mut latest: Option<TrimFrame> = None;
+            while let Ok(frame) = playback.frame_rx.try_recv() {
+                latest = Some(frame);
+            }
+            if let Some(frame) = latest {
+                if let Some(tex) = Self::load_trim_texture_rgba(
+                    ctx,
+                    "trim_scrub",
+                    frame.width,
+                    frame.height,
+                    &frame.rgba,
+                ) {
+                    self.trim_preview_texture = Some(tex);
+                    self.trim_loaded_preview = Some(frame.time_secs);
+                    self.trim_preview_error = None;
+                }
+            }
+        }
+
+        ctx.request_repaint();
+    }
+
+    fn poll_trim_preview(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.trim_preview_rx {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.trim_preview_rx = None;
+                    self.trim_preview_pending = false;
+                    match result {
+                        Ok((time_secs, png)) => {
+                            let Some(state) = &self.trim else {
+                                return;
+                            };
+                            if (state.preview_secs - time_secs).abs() > 0.05 {
+                                return;
+                            }
+                            if let Some(tex) = Self::load_trim_texture(ctx, "trim_scrub", &png) {
+                                self.trim_preview_texture = Some(tex);
+                                self.trim_loaded_preview = Some(time_secs);
+                                self.trim_preview_error = None;
+                            }
+                        }
+                        Err(error) => {
+                            self.trim_preview_error = Some(error);
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.trim_preview_rx = None;
+                    self.trim_preview_pending = false;
+                }
+            }
+        }
+
+        if self.trim.is_some() {
+            self.schedule_trim_preview();
+        }
+    }
+
+    fn trim_transport_button(ui: &mut egui::Ui, playing: bool, enabled: bool) -> bool {
+        const SIZE: f32 = 48.0;
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::click());
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter();
+            let accent = theme::accent();
+            let fill = if enabled {
+                accent
+            } else {
+                theme::button_disabled()
+            };
+            painter.circle_filled(rect.center(), SIZE * 0.44, fill);
+            let icon_color = egui::Color32::WHITE;
+            let c = rect.center();
+            if playing {
+                let bar_w = 4.0;
+                let bar_h = 16.0;
+                let gap = 5.0;
+                painter.rect_filled(
+                    egui::Rect::from_center_size(
+                        egui::pos2(c.x - gap / 2.0, c.y),
+                        egui::vec2(bar_w, bar_h),
+                    ),
+                    1.0,
+                    icon_color,
+                );
+                painter.rect_filled(
+                    egui::Rect::from_center_size(
+                        egui::pos2(c.x + gap / 2.0, c.y),
+                        egui::vec2(bar_w, bar_h),
+                    ),
+                    1.0,
+                    icon_color,
+                );
+            } else {
+                let tri = vec![
+                    egui::pos2(c.x - 5.0, c.y - 9.0),
+                    egui::pos2(c.x - 5.0, c.y + 9.0),
+                    egui::pos2(c.x + 10.0, c.y),
+                ];
+                painter.add(egui::Shape::convex_polygon(
+                    tri,
+                    icon_color,
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
+        enabled && response.clicked()
+    }
+
+    fn trim_timeline_ui(
+        ui: &mut egui::Ui,
+        duration_secs: f64,
+        start_secs: &mut f64,
+        end_secs: &mut f64,
+        preview_secs: &mut f64,
+        drag_handle: &mut Option<TrimHandle>,
+        filmstrip: Option<&egui::TextureHandle>,
+        filmstrip_loading: bool,
+        timeline_width: f32,
+        timeline_height: f32,
+    ) -> bool {
+        const HANDLE_HIT: f32 = 10.0;
+        const PLAYHEAD_HIT: f32 = 14.0;
+        const MIN_GAP: f64 = 0.5;
+        let mut interacted = false;
+
+        let width = timeline_width.max(200.0);
+
+        let (response, painter) = ui.allocate_painter(
+            egui::vec2(width, timeline_height),
+            egui::Sense::click_and_drag(),
+        );
+        let rect = response.rect;
+
+        let time_at_x = |x: f32| -> f64 {
+            let frac = ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            frac as f64 * duration_secs
+        };
+
+        let x_at_time = |t: f64| -> f32 {
+            let frac = if duration_secs > 0.0 {
+                (t / duration_secs).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            rect.left() + rect.width() * frac as f32
+        };
+
+        if *start_secs >= *end_secs {
+            *end_secs = (*start_secs + MIN_GAP).min(duration_secs);
+        }
+        *start_secs = start_secs.clamp(0.0, duration_secs);
+        *end_secs = end_secs.clamp((*start_secs + MIN_GAP).min(duration_secs), duration_secs);
+
+        let track_color = theme::surface_track();
+        let dim_color = theme::surface_dim();
+        let keep_tint = theme::keep_tint();
+        let handle_color = egui::Color32::WHITE;
+        let playhead_color = theme::accent_bright();
+
+        painter.rect_filled(rect, 6.0, track_color);
+
+        if let Some(texture) = filmstrip {
+            painter.image(
+                texture.id(),
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        } else if filmstrip_loading {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Loading timeline…",
+                egui::FontId::proportional(12.0),
+                theme::text_muted(),
+            );
+        }
+
+        let start_x = x_at_time(*start_secs);
+        let end_x = x_at_time(*end_secs);
+        let playhead_x = x_at_time(*preview_secs);
+
+        let left_dim =
+            egui::Rect::from_min_max(rect.left_top(), egui::pos2(start_x, rect.bottom()));
+        let keep = egui::Rect::from_min_max(
+            egui::pos2(start_x, rect.top()),
+            egui::pos2(end_x, rect.bottom()),
+        );
+        let right_dim =
+            egui::Rect::from_min_max(egui::pos2(end_x, rect.top()), rect.right_bottom());
+
+        painter.rect_filled(left_dim, 0.0, dim_color);
+        painter.rect_filled(keep, 0.0, keep_tint);
+        painter.rect_filled(right_dim, 0.0, dim_color);
+
+        let handle_w = 4.0;
+        painter.rect_filled(
+            egui::Rect::from_center_size(
+                egui::pos2(start_x, rect.center().y),
+                egui::vec2(handle_w, rect.height() - 4.0),
+            ),
+            2.0,
+            handle_color,
+        );
+        painter.rect_filled(
+            egui::Rect::from_center_size(
+                egui::pos2(end_x, rect.center().y),
+                egui::vec2(handle_w, rect.height() - 4.0),
+            ),
+            2.0,
+            handle_color,
+        );
+
+        painter.line_segment(
+            [
+                egui::pos2(playhead_x, rect.top()),
+                egui::pos2(playhead_x, rect.bottom()),
+            ],
+            egui::Stroke::new(2.0_f32, playhead_color),
+        );
+        painter.circle_filled(
+            egui::pos2(playhead_x, rect.top() + 5.0),
+            5.0,
+            playhead_color,
+        );
+        painter.circle_stroke(
+            egui::pos2(playhead_x, rect.top() + 5.0),
+            5.0,
+            egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
+        );
+
+        if let Some(pos) = response.interact_pointer_pos() {
+            if response.drag_started() {
+                if (pos.x - start_x).abs() <= HANDLE_HIT {
+                    *drag_handle = Some(TrimHandle::Start);
+                } else if (pos.x - end_x).abs() <= HANDLE_HIT {
+                    *drag_handle = Some(TrimHandle::End);
+                } else if (pos.x - playhead_x).abs() <= PLAYHEAD_HIT {
+                    *drag_handle = Some(TrimHandle::Playhead);
+                } else {
+                    *drag_handle = None;
+                }
+            }
+
+            if response.dragged() {
+                interacted = true;
+                let t = time_at_x(pos.x);
+                match drag_handle {
+                    Some(TrimHandle::Start) => {
+                        *start_secs = t.clamp(0.0, *end_secs - MIN_GAP);
+                        *preview_secs = *start_secs;
+                    }
+                    Some(TrimHandle::End) => {
+                        *end_secs = t.clamp(*start_secs + MIN_GAP, duration_secs);
+                        *preview_secs = *end_secs;
+                    }
+                    Some(TrimHandle::Playhead) => {
+                        *preview_secs = t.clamp(0.0, duration_secs);
+                    }
+                    None => {}
+                }
+            } else if response.clicked() {
+                let near_start = (pos.x - start_x).abs() <= HANDLE_HIT;
+                let near_end = (pos.x - end_x).abs() <= HANDLE_HIT;
+                let near_playhead = (pos.x - playhead_x).abs() <= PLAYHEAD_HIT;
+                if !near_start && !near_end && !near_playhead {
+                    interacted = true;
+                    *preview_secs = time_at_x(pos.x).clamp(0.0, duration_secs);
+                }
+            }
+        }
+
+        if response.drag_stopped() {
+            *drag_handle = None;
+        }
+
+        ui.ctx().set_cursor_icon(if response.hovered() {
+            egui::CursorIcon::PointingHand
+        } else {
+            egui::CursorIcon::Default
+        });
+
+        interacted
+    }
+
+    fn apply_trim(&mut self) {
+        if self.trimming {
+            self.toast("Trim already in progress…");
+            return;
+        }
+        if self.saving {
+            self.toast("Wait for save to finish before trimming");
+            return;
+        }
+        let Some(state) = self.trim.clone() else {
+            return;
+        };
+        if state.end_secs <= state.start_secs {
+            self.toast("Invalid trim range");
+            return;
+        }
+        if state.end_secs - state.start_secs < 0.5 {
+            self.toast("Trimmed clip must be at least 0.5s");
+            return;
+        }
+
+        self.trimming = true;
+        self.toast("Trimming clip…");
+
+        let path = state.path.clone();
+        let start = state.start_secs;
+        let end = state.end_secs;
+        let (tx, rx) = mpsc::channel();
+        self.trim_rx = Some(rx);
+
+        thread::spawn(move || {
+            let result = trim_clip(&path, start, end).map(|()| path);
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_trim_result(&mut self) {
+        let Some(rx) = &self.trim_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(result) => {
+                self.trim_rx = None;
+                self.trimming = false;
+                match result {
+                    Ok(path) => {
+                        let name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("clip")
+                            .to_string();
+                        self.toast(format!("Trimmed {name}"));
+                        notify_desktop("Clip trimmed", &name);
+                        self.trim = None;
+                        self.clear_trim_previews();
+                        self.page = Page::Clips;
+                        self.clips_dirty = true;
+                        self.textures.clear();
+                        self.clip_meta.clear();
+                    }
+                    Err(error) => self.toast(error),
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.trim_rx = None;
+                self.trimming = false;
+                self.toast("Trim failed: worker disconnected");
+            }
+        }
+    }
+
     fn apply_hotkey(&mut self) {
         self.hotkeys
             .rebind(&self.config.hotkey, self.config.portal_hotkey_enabled);
@@ -306,6 +949,10 @@ impl eframe::App for ReplayForge {
         }
 
         self.poll_save_result();
+        self.poll_trim_result();
+        self.poll_trim_filmstrip(ctx);
+        self.poll_trim_playback(ctx);
+        self.poll_trim_preview(ctx);
 
         if self.quit_requested {
             let _ = self.recorder.lock().unwrap().stop();
@@ -341,11 +988,29 @@ impl eframe::App for ReplayForge {
             return;
         }
 
+        if self.page == Page::Trim && self.trim.is_none() {
+            self.page = Page::Clips;
+        }
+
+        if self.page == Page::Trim {
+            self.ui_trim_page(ctx);
+            egui::TopBottomPanel::bottom("status_bar_trim").show(ctx, |ui| {
+                if let Some(toast) = &self.status {
+                    ui.label(&toast.message);
+                } else if self.trimming {
+                    ui.label("Trimming…");
+                } else {
+                    ui.label("Drag handles or click timeline · Escape to go back");
+                }
+            });
+            return;
+        }
+
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             if let Some(toast) = &self.status {
                 ui.label(&toast.message);
             } else if let Some(error) = &self.detection.error {
-                ui.colored_label(egui::Color32::from_rgb(220, 80, 80), error);
+                ui.colored_label(theme::error(), error);
             } else {
                 ui.label(format!(
                     "{} · {} · {}s",
@@ -355,27 +1020,33 @@ impl eframe::App for ReplayForge {
         });
 
         egui::SidePanel::left("sidebar")
-            .default_width(160.0)
+            .default_width(200.0)
+            .frame(
+                egui::Frame::default()
+                    .fill(egui::Color32::from_gray(20))
+                    .inner_margin(egui::Margin::symmetric(12, 16)),
+            )
             .show(ctx, |ui| {
-                ui.heading("ReplayForge");
-                ui.separator();
+                ui.label(
+                    egui::RichText::new("ReplayForge")
+                        .size(20.0)
+                        .strong()
+                        .color(theme::accent_bright()),
+                );
+                ui.label(
+                    egui::RichText::new("Instant replay")
+                        .size(12.0)
+                        .color(theme::text_muted()),
+                );
+                ui.add_space(16.0);
 
-                if ui
-                    .selectable_label(self.page == Page::Home, "Home")
-                    .clicked()
-                {
+                if theme::nav_item(ui, "Home", self.page == Page::Home) {
                     self.page = Page::Home;
                 }
-                if ui
-                    .selectable_label(self.page == Page::Clips, "Clips")
-                    .clicked()
-                {
+                if theme::nav_item(ui, "Clips", self.page == Page::Clips) {
                     self.page = Page::Clips;
                 }
-                if ui
-                    .selectable_label(self.page == Page::Settings, "Settings")
-                    .clicked()
-                {
+                if theme::nav_item(ui, "Settings", self.page == Page::Settings) {
                     self.page = Page::Settings;
                 }
             });
@@ -384,6 +1055,7 @@ impl eframe::App for ReplayForge {
             Page::Home => self.ui_home(ui),
             Page::Clips => self.ui_clips(ui),
             Page::Settings => self.ui_settings(ui),
+            Page::Trim => {}
         });
     }
 }
@@ -451,7 +1123,7 @@ impl ReplayForge {
 
                 ui.add_space(12.0);
                 if let Some(error) = &self.detection.error {
-                    ui.colored_label(egui::Color32::from_rgb(220, 80, 80), error);
+                    ui.colored_label(theme::error(), error);
                 } else {
                     let backend = match self.detection.backend {
                         Some(crate::detect::ResolvedBackend::Host) => "host gpu-screen-recorder",
@@ -476,69 +1148,92 @@ impl ReplayForge {
 
     fn ui_home(&mut self, ui: &mut egui::Ui) {
         ui.heading("Home");
-        ui.separator();
+        ui.add_space(8.0);
 
         let replay_running = self.recorder.lock().unwrap().is_running();
 
-        ui.label(if self.saving {
-            "Saving clip…"
-        } else if replay_running {
-            "Replay is running"
-        } else {
-            "Replay is stopped"
-        });
+        theme::section_frame().show(ui, |ui| {
+            ui.set_max_width(420.0);
 
-        ui.add_space(6.0);
-        ui.label(format!(
-            "Display: {} · {} FPS · {}s · {}",
-            self.config.display, self.config.fps, self.config.buffer_seconds, self.config.codec
-        ));
+            ui.horizontal(|ui| {
+                let (status_color, status_text) = if self.saving {
+                    (theme::accent(), "Saving clip…")
+                } else if replay_running {
+                    (theme::status_running(), "Replay running")
+                } else {
+                    (theme::text_muted(), "Replay stopped")
+                };
+                let (dot_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(12.0, 16.0), egui::Sense::hover());
+                ui.painter()
+                    .circle_filled(dot_rect.center(), 5.0, status_color);
+                ui.label(egui::RichText::new(status_text).size(16.0).strong());
+            });
 
-        if let Some(error) = self.recorder.lock().unwrap().last_error() {
-            ui.colored_label(egui::Color32::from_rgb(220, 80, 80), error.to_string());
-        }
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Display: {} · {} FPS · {}s buffer · {}",
+                    self.config.display,
+                    self.config.fps,
+                    self.config.buffer_seconds,
+                    self.config.codec
+                ))
+                .color(theme::text_muted())
+                .size(13.0),
+            );
 
-        ui.add_space(12.0);
-
-        let button_text = if replay_running {
-            "Stop Replay"
-        } else {
-            "Start Replay"
-        };
-
-        if ui
-            .add_sized([220.0, 40.0], egui::Button::new(button_text))
-            .clicked()
-        {
-            if replay_running {
-                self.stop_replay();
-            } else {
-                self.start_replay();
+            if let Some(error) = self.recorder.lock().unwrap().last_error() {
+                ui.add_space(8.0);
+                ui.colored_label(theme::error(), error.to_string());
             }
-        }
 
-        if replay_running {
-            ui.add_space(10.0);
-            let save_label = if self.saving {
-                "Saving…"
+            ui.add_space(16.0);
+
+            let button_text = if replay_running {
+                "Stop Replay"
             } else {
-                "Save Clip"
+                "Start Replay"
             };
+
             if ui
-                .add_enabled(
-                    !self.saving,
-                    egui::Button::new(save_label).min_size(egui::vec2(220.0, 40.0)),
-                )
+                .add_sized([240.0, 42.0], theme::primary_button(button_text))
                 .clicked()
             {
-                self.save_clip_action();
+                if replay_running {
+                    self.stop_replay();
+                } else {
+                    self.start_replay();
+                }
             }
-            ui.add_space(6.0);
-            ui.label(format!(
-                "Or press {} (global or while focused)",
-                self.config.hotkey
-            ));
-        }
+
+            if replay_running {
+                ui.add_space(10.0);
+                let save_label = if self.saving {
+                    "Saving…"
+                } else {
+                    "Save Clip"
+                };
+                if ui
+                    .add_enabled(
+                        !self.saving,
+                        theme::secondary_button(save_label).min_size(egui::vec2(240.0, 42.0)),
+                    )
+                    .clicked()
+                {
+                    self.save_clip_action();
+                }
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Or press {} (global or while focused)",
+                        self.config.hotkey
+                    ))
+                    .color(theme::text_muted())
+                    .size(12.0),
+                );
+            }
+        });
     }
 
     fn ui_clips(&mut self, ui: &mut egui::Ui) {
@@ -632,6 +1327,7 @@ impl ReplayForge {
 
                 let mut open_path_req: Option<PathBuf> = None;
                 let mut copy_path_req: Option<PathBuf> = None;
+                let mut start_trim_req: Option<PathBuf> = None;
                 let mut delete_req: Option<(PathBuf, PathBuf)> = None;
                 let mut start_rename: Option<PathBuf> = None;
                 let mut finish_rename: Option<(PathBuf, String)> = None;
@@ -739,6 +1435,9 @@ impl ReplayForge {
                                                 if ui.button("Rename").clicked() {
                                                     start_rename = Some(clip_path.clone());
                                                 }
+                                                if ui.button("Trim").clicked() {
+                                                    start_trim_req = Some(clip_path.clone());
+                                                }
                                                 if ui.button("Delete").clicked() {
                                                     delete_req = Some((
                                                         clip_path.clone(),
@@ -764,6 +1463,10 @@ impl ReplayForge {
                 if let Some(path) = copy_path_req {
                     ui.ctx().copy_text(path.display().to_string());
                     self.toast("Path copied");
+                }
+
+                if let Some(path) = start_trim_req {
+                    self.open_trim(path);
                 }
 
                 if let Some(path) = start_rename {
@@ -1139,6 +1842,19 @@ impl ReplayForge {
             }
             if ui
                 .checkbox(
+                    &mut self.config.auto_start_replay,
+                    "Start replay buffer when ReplayForge opens",
+                )
+                .on_hover_text(
+                    "Automatically begins recording the rolling buffer after launch \
+                     (skipped during first-run setup).",
+                )
+                .changed()
+            {
+                self.persist_config();
+            }
+            if ui
+                .checkbox(
                     &mut self.config.minimize_to_tray,
                     "Minimize to tray on close",
                 )
@@ -1150,7 +1866,10 @@ impl ReplayForge {
             ui.add_space(16.0);
             if self.settings_dirty {
                 if ui
-                    .add_sized([220.0, 36.0], egui::Button::new("Apply & Save"))
+                    .add_sized(
+                        [220.0, 36.0],
+                        theme::primary_button("Apply & Save"),
+                    )
                     .clicked()
                 {
                     self.apply_capture_settings();
@@ -1160,5 +1879,157 @@ impl ReplayForge {
                 self.toast("Settings saved");
             }
         });
+    }
+
+    fn ui_trim_page(&mut self, ctx: &egui::Context) {
+        let Some(mut state) = self.trim.clone() else {
+            return;
+        };
+
+        let mut apply = false;
+        let mut back = false;
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !self.trimming {
+            self.cancel_trim();
+            return;
+        }
+
+        let clip_name = state
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("clip")
+            .to_string();
+        let total_label = format_duration(state.duration_secs);
+        let kept = (state.end_secs - state.start_secs).max(0.0);
+        let kept_label = format_duration(kept);
+        let start_label = format_duration(state.start_secs);
+        let end_label = format_duration(state.end_secs);
+        let range_valid =
+            kept >= 0.5 && state.start_secs >= 0.0 && state.end_secs <= state.duration_secs + 0.05;
+        let preview_label = format_duration(state.preview_secs);
+        let playing = self.trim_is_playing();
+
+        egui::TopBottomPanel::top("trim_header")
+            .frame(egui::Frame::default().inner_margin(egui::Margin::symmetric(12, 8)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!self.trimming, egui::Button::new("← Back"))
+                        .clicked()
+                    {
+                        back = true;
+                    }
+                    ui.heading(format!("Trim — {clip_name}"));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let can_apply = range_valid && !self.trimming && !self.saving;
+                        if ui
+                            .add_enabled(can_apply, theme::primary_button("Apply trim"))
+                            .clicked()
+                        {
+                            apply = true;
+                        }
+                    });
+                });
+            });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                let preview_width = (ui.available_width() - 32.0).max(320.0);
+                let preview_height = preview_width * 9.0 / 16.0;
+                let preview_size = egui::vec2(preview_width, preview_height);
+
+                if !self.trim_filmstrip_pending {
+                    if self.trim_filmstrip_texture.is_none() {
+                        self.schedule_trim_filmstrip(preview_width);
+                    } else if (preview_width - self.trim_filmstrip_width).abs() > 48.0 {
+                        self.trim_filmstrip_texture = None;
+                        self.schedule_trim_filmstrip(preview_width);
+                    }
+                }
+
+                let preview_frame = egui::Frame::default()
+                    .fill(theme::surface())
+                    .corner_radius(theme::CORNER_RADIUS);
+
+                preview_frame.show(ui, |ui| {
+                    ui.set_width(preview_width);
+                    ui.set_height(preview_height);
+                    ui.vertical_centered(|ui| {
+                        if let Some(texture) = &self.trim_preview_texture {
+                            ui.add(egui::Image::new(texture).fit_to_exact_size(preview_size));
+                        } else if self.trim_preview_pending {
+                            ui.label("Loading preview…");
+                        } else if let Some(error) = &self.trim_preview_error {
+                            ui.colored_label(theme::error(), error);
+                        } else {
+                            ui.label("Preview unavailable");
+                        }
+                    });
+                });
+
+                ui.add_space(12.0);
+
+                ui.horizontal(|ui| {
+                    ui.set_width(preview_width);
+                    if Self::trim_transport_button(ui, playing, !self.trimming) {
+                        self.toggle_trim_playback();
+                    }
+                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new(&preview_label)
+                            .size(18.0)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!(" / {total_label}"))
+                            .size(18.0)
+                            .color(theme::text_muted()),
+                    );
+                });
+
+                ui.add_space(8.0);
+
+                let filmstrip = self.trim_filmstrip_texture.clone();
+                let filmstrip_loading = self.trim_filmstrip_pending;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(preview_width, 64.0),
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| {
+                        let interacted = Self::trim_timeline_ui(
+                            ui,
+                            state.duration_secs,
+                            &mut state.start_secs,
+                            &mut state.end_secs,
+                            &mut state.preview_secs,
+                            &mut self.trim_drag_handle,
+                            filmstrip.as_ref(),
+                            filmstrip_loading,
+                            preview_width,
+                            64.0,
+                        );
+                        if interacted {
+                            self.stop_trim_playback();
+                        }
+                    },
+                );
+
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Keeping {kept_label} of {total_label}  ·  Start {start_label}  ·  End {end_label}"
+                    ))
+                    .color(theme::text_muted_light()),
+                );
+            });
+        });
+
+        self.trim = Some(state);
+
+        if back {
+            self.cancel_trim();
+        } else if apply {
+            self.apply_trim();
+        }
     }
 }

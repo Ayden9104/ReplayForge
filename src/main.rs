@@ -1,10 +1,13 @@
 mod app;
+mod clips;
 mod config;
 mod detect;
 mod host;
 mod hotkeys;
 mod recorder;
+mod theme;
 mod tray;
+mod trim_playback;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -18,7 +21,10 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "ReplayForge",
         options,
-        Box::new(|_cc| Ok(Box::new(app::ReplayForge::new()))),
+        Box::new(|cc| {
+            theme::apply_theme(&cc.egui_ctx);
+            Ok(Box::new(app::ReplayForge::new()))
+        }),
     )
 }
 
