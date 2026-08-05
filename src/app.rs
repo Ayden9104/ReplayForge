@@ -1,8 +1,10 @@
+//! ReplayForge egui application shell (home, clips, settings, hotkeys).
 use crate::config::{
-    codec_choices, hotkey_choices, path_display, set_autostart, Backend, Config,
+    Backend, Config, SystemAudioMode, codec_choices, hotkey_choices, path_display, quality_choices,
+    set_autostart,
 };
-use crate::detect::{probe_clip_meta, Detection};
-use crate::host::open_path;
+use crate::detect::{Detection, friendly_audio_app_label, probe_clip_meta};
+use crate::host::{notify_desktop, open_path};
 use crate::hotkeys::HotkeyService;
 use crate::recorder::Recorder;
 use crate::tray::{TrayCommand, TrayHandle};
@@ -13,13 +15,20 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(PartialEq)]
 enum Page {
     Home,
     Clips,
     Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipSort {
+    Newest,
+    Name,
+    Largest,
 }
 
 struct Toast {
@@ -49,6 +58,8 @@ pub struct ReplayForge {
     quit_requested: bool,
     saving: bool,
     save_rx: Option<Receiver<Result<PathBuf, String>>>,
+    clip_sort: ClipSort,
+    clip_filter: String,
 }
 
 impl ReplayForge {
@@ -56,17 +67,12 @@ impl ReplayForge {
         let config = Config::load();
         let detection = Detection::refresh(config.backend);
 
-        if config.display == "screen"
-            && detection
-                .monitors
-                .iter()
-                .any(|m| m.name != "screen")
-        {
+        if config.display == "screen" && detection.monitors.iter().any(|m| m.name != "screen") {
             // Keep "screen" as a valid default for first run.
         }
 
         let show_first_run = config.is_first_run();
-        let hotkeys = HotkeyService::start(&config.hotkey);
+        let hotkeys = HotkeyService::start(&config.hotkey, config.portal_hotkey_enabled);
 
         let tray = match crate::tray::create_tray() {
             Ok(tray) => Some(tray),
@@ -100,6 +106,8 @@ impl ReplayForge {
             quit_requested: false,
             saving: false,
             save_rx: None,
+            clip_sort: ClipSort::Newest,
+            clip_filter: String::new(),
         }
     }
 
@@ -198,7 +206,9 @@ impl ReplayForge {
                             .and_then(|n| n.to_str())
                             .unwrap_or("clip")
                             .to_string();
-                        self.toast(format!("Saved {name}"));
+                        let msg = format!("Saved {name}");
+                        self.toast(msg.clone());
+                        notify_desktop("Clip saved", &format!("{name}\n{}", path.display()));
                         self.clips_dirty = true;
                         self.textures.clear();
                         self.clip_meta.clear();
@@ -217,7 +227,8 @@ impl ReplayForge {
     }
 
     fn apply_hotkey(&mut self) {
-        self.hotkeys.rebind(&self.config.hotkey);
+        self.hotkeys
+            .rebind(&self.config.hotkey, self.config.portal_hotkey_enabled);
         self.toast(self.hotkeys.status.clone());
     }
 
@@ -414,12 +425,39 @@ impl ReplayForge {
                 });
 
                 ui.add_space(12.0);
+                ui.heading("3. Audio");
+                ui.checkbox(
+                    &mut self.config.capture_system_audio,
+                    "Capture system / game audio",
+                );
+                ui.checkbox(&mut self.config.capture_microphone, "Capture microphone");
+                ui.label("You can switch to per-app audio later in Settings.");
+
+                ui.add_space(12.0);
+                ui.heading("4. In-game hotkey (Wayland)");
+                ui.label(
+                    "For F8 while a game is focused, enable the desktop portal hotkey \
+                     (no sudo). You can also do this later in Settings.",
+                );
+                if ui.button("Enable global hotkey (portal)…").clicked() {
+                    match self.hotkeys.enable_portal(&self.config.hotkey) {
+                        Ok(trigger) => {
+                            self.config.portal_hotkey_enabled = true;
+                            self.toast(format!("Portal hotkey enabled ({trigger})"));
+                        }
+                        Err(error) => self.toast(format!("Portal hotkey failed: {error}")),
+                    }
+                }
+
+                ui.add_space(12.0);
                 if let Some(error) = &self.detection.error {
                     ui.colored_label(egui::Color32::from_rgb(220, 80, 80), error);
                 } else {
                     let backend = match self.detection.backend {
                         Some(crate::detect::ResolvedBackend::Host) => "host gpu-screen-recorder",
-                        Some(crate::detect::ResolvedBackend::Flatpak) => "Flatpak gpu-screen-recorder",
+                        Some(crate::detect::ResolvedBackend::Flatpak) => {
+                            "Flatpak gpu-screen-recorder"
+                        }
                         None => "not found",
                     };
                     ui.label(format!("Capture backend: {backend}"));
@@ -481,7 +519,11 @@ impl ReplayForge {
 
         if replay_running {
             ui.add_space(10.0);
-            let save_label = if self.saving { "Saving…" } else { "Save Clip" };
+            let save_label = if self.saving {
+                "Saving…"
+            } else {
+                "Save Clip"
+            };
             if ui
                 .add_enabled(
                     !self.saving,
@@ -492,7 +534,10 @@ impl ReplayForge {
                 self.save_clip_action();
             }
             ui.add_space(6.0);
-            ui.label(format!("Or press {} (global or while focused)", self.config.hotkey));
+            ui.label(format!(
+                "Or press {} (global or while focused)",
+                self.config.hotkey
+            ));
         }
     }
 
@@ -508,6 +553,26 @@ impl ReplayForge {
                 let _ = self.config.ensure_output_dir();
                 open_path(&self.config.output_dir);
             }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Sort");
+            egui::ComboBox::from_id_salt("clip_sort")
+                .selected_text(match self.clip_sort {
+                    ClipSort::Newest => "Newest",
+                    ClipSort::Name => "Name",
+                    ClipSort::Largest => "Largest",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.clip_sort, ClipSort::Newest, "Newest");
+                    ui.selectable_value(&mut self.clip_sort, ClipSort::Name, "Name");
+                    ui.selectable_value(&mut self.clip_sort, ClipSort::Largest, "Largest");
+                });
+            ui.label("Filter");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.clip_filter)
+                    .desired_width(180.0)
+                    .hint_text("Search filename…"),
+            );
         });
         ui.separator();
 
@@ -527,15 +592,46 @@ impl ReplayForge {
                     })
                     .collect();
 
-                clips.sort();
-                clips.reverse();
+                let filter = self.clip_filter.trim().to_ascii_lowercase();
+                if !filter.is_empty() {
+                    clips.retain(|path| {
+                        path.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n.to_ascii_lowercase().contains(&filter))
+                            .unwrap_or(false)
+                    });
+                }
+
+                match self.clip_sort {
+                    ClipSort::Name => {
+                        clips.sort();
+                        clips.reverse();
+                    }
+                    ClipSort::Newest => {
+                        clips.sort_by_key(|path| {
+                            fs::metadata(path)
+                                .and_then(|m| m.modified())
+                                .unwrap_or(SystemTime::UNIX_EPOCH)
+                        });
+                        clips.reverse();
+                    }
+                    ClipSort::Largest => {
+                        clips.sort_by_key(|path| fs::metadata(path).map(|m| m.len()).unwrap_or(0));
+                        clips.reverse();
+                    }
+                }
 
                 if clips.is_empty() {
-                    ui.label("No clips yet. Start replay and hit Save Clip.");
+                    if filter.is_empty() {
+                        ui.label("No clips yet. Start replay and hit Save Clip.");
+                    } else {
+                        ui.label("No clips match that filter.");
+                    }
                     return;
                 }
 
                 let mut open_path_req: Option<PathBuf> = None;
+                let mut copy_path_req: Option<PathBuf> = None;
                 let mut delete_req: Option<(PathBuf, PathBuf)> = None;
                 let mut start_rename: Option<PathBuf> = None;
                 let mut finish_rename: Option<(PathBuf, String)> = None;
@@ -553,15 +649,14 @@ impl ReplayForge {
                                     .unwrap_or("Unknown clip")
                                     .to_string();
 
-                                let (duration_label, size_label) = if let Some(cached) =
-                                    self.clip_meta.get(clip_path)
-                                {
-                                    cached.clone()
-                                } else {
-                                    let probed = probe_clip_meta(clip_path);
-                                    self.clip_meta.insert(clip_path.clone(), probed.clone());
-                                    probed
-                                };
+                                let (duration_label, size_label) =
+                                    if let Some(cached) = self.clip_meta.get(clip_path) {
+                                        cached.clone()
+                                    } else {
+                                        let probed = probe_clip_meta(clip_path);
+                                        self.clip_meta.insert(clip_path.clone(), probed.clone());
+                                        probed
+                                    };
 
                                 let thumbnail_path = clip_path.with_extension("png");
 
@@ -629,12 +724,17 @@ impl ReplayForge {
                                             }
                                         } else {
                                             ui.label(&clip_name);
-                                            ui.label(format!(
-                                                "{duration_label} · {size_label}"
-                                            ));
+                                            ui.label(format!("{duration_label} · {size_label}"));
                                             ui.horizontal(|ui| {
                                                 if ui.button("Open").clicked() {
                                                     open_path_req = Some(clip_path.clone());
+                                                }
+                                                if ui
+                                                    .button("Copy path")
+                                                    .on_hover_text("Copy full path to clipboard")
+                                                    .clicked()
+                                                {
+                                                    copy_path_req = Some(clip_path.clone());
                                                 }
                                                 if ui.button("Rename").clicked() {
                                                     start_rename = Some(clip_path.clone());
@@ -659,6 +759,11 @@ impl ReplayForge {
 
                 if let Some(path) = open_path_req {
                     open_path(&path);
+                }
+
+                if let Some(path) = copy_path_req {
+                    ui.ctx().copy_text(path.display().to_string());
+                    self.toast("Path copied");
                 }
 
                 if let Some(path) = start_rename {
@@ -786,6 +891,146 @@ impl ReplayForge {
             });
 
             ui.horizontal(|ui| {
+                ui.label("Quality");
+                egui::ComboBox::from_id_salt("settings_quality")
+                    .selected_text(format!(
+                        "{} ({} kbps)",
+                        self.config.quality.label(),
+                        self.config.quality.bitrate_kbps()
+                    ))
+                    .show_ui(ui, |ui| {
+                        for preset in quality_choices() {
+                            if ui
+                                .selectable_value(
+                                    &mut self.config.quality,
+                                    *preset,
+                                    format!("{} ({} kbps)", preset.label(), preset.bitrate_kbps()),
+                                )
+                                .changed()
+                            {
+                                self.settings_dirty = true;
+                            }
+                        }
+                    });
+            });
+            ui.label("Quality uses GSR constant bitrate (recommended for replay buffer).");
+
+            if ui
+                .checkbox(
+                    &mut self.config.capture_system_audio,
+                    "Capture system audio",
+                )
+                .on_hover_text(
+                    "Records desktop/game audio via GPU Screen Recorder (all output or selected apps)",
+                )
+                .changed()
+            {
+                self.apply_capture_settings();
+            }
+            if ui
+                .checkbox(&mut self.config.capture_microphone, "Capture microphone")
+                .on_hover_text(
+                    "Records the default mic via GPU Screen Recorder (default_input). \
+                     Merged with system audio into one track when both are enabled.",
+                )
+                .changed()
+            {
+                self.apply_capture_settings();
+            }
+
+            ui.add_enabled_ui(self.config.capture_system_audio, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("System audio source");
+                    if ui
+                        .selectable_value(
+                            &mut self.config.system_audio_mode,
+                            SystemAudioMode::All,
+                            "All system audio",
+                        )
+                        .changed()
+                    {
+                        self.apply_capture_settings();
+                    }
+                    if ui
+                        .selectable_value(
+                            &mut self.config.system_audio_mode,
+                            SystemAudioMode::Apps,
+                            "Selected apps",
+                        )
+                        .changed()
+                    {
+                        self.apply_capture_settings();
+                    }
+                });
+
+                if self.config.system_audio_mode == SystemAudioMode::Apps {
+                    ui.horizontal(|ui| {
+                        ui.label("Applications");
+                        if ui.button("Refresh apps").clicked() {
+                            self.detection = Detection::refresh(self.config.backend);
+                            if let Some(error) = &self.detection.audio_apps_error {
+                                self.toast(error.clone());
+                            } else {
+                                self.toast(format!(
+                                    "Found {} app(s) with audio",
+                                    self.detection.audio_apps.len()
+                                ));
+                            }
+                        }
+                    });
+
+                    if let Some(error) = &self.detection.audio_apps_error {
+                        ui.label(format!("Could not list apps: {error}"));
+                    } else if self.detection.audio_apps.is_empty() {
+                        ui.label(
+                            "No apps listed yet. Play audio in the game (and Discord), then Refresh. \
+                             Names are PipeWire clients — e.g. Discord often shows as “webrtc voiceengine”.",
+                        );
+                    }
+
+                    // Include selected apps that are not currently listed (still valid for GSR).
+                    let mut listed: Vec<String> = self.detection.audio_apps.clone();
+                    for selected in &self.config.audio_apps {
+                        if !listed.iter().any(|a| a == selected) {
+                            listed.push(selected.clone());
+                        }
+                    }
+                    listed.sort();
+
+                    egui::ScrollArea::vertical()
+                        .max_height(140.0)
+                        .show(ui, |ui| {
+                            for app_name in listed {
+                                let mut checked =
+                                    self.config.audio_apps.iter().any(|a| a == &app_name);
+                                let label = friendly_audio_app_label(&app_name);
+                                if ui.checkbox(&mut checked, label).changed() {
+                                    if checked {
+                                        if !self.config.audio_apps.iter().any(|a| a == &app_name) {
+                                            self.config.audio_apps.push(app_name);
+                                        }
+                                    } else {
+                                        self.config.audio_apps.retain(|a| a != &app_name);
+                                    }
+                                    self.apply_capture_settings();
+                                }
+                            }
+                        });
+
+                    if self.config.audio_apps.is_empty() {
+                        ui.label(
+                            "No apps selected — using all system audio until you pick apps.",
+                        );
+                    } else {
+                        ui.label(format!(
+                            "Capturing {} selected app(s) (+ mic if enabled).",
+                            self.config.audio_apps.len()
+                        ));
+                    }
+                }
+            });
+
+            ui.horizontal(|ui| {
                 ui.label("Backend");
                 let backend_label = match self.config.backend {
                     Backend::Auto => "Auto",
@@ -835,11 +1080,7 @@ impl ReplayForge {
                     .show_ui(ui, |ui| {
                         for key in hotkey_choices() {
                             if ui
-                                .selectable_value(
-                                    &mut self.config.hotkey,
-                                    (*key).to_string(),
-                                    *key,
-                                )
+                                .selectable_value(&mut self.config.hotkey, (*key).to_string(), *key)
                                 .changed()
                             {
                                 self.apply_hotkey();
@@ -849,7 +1090,41 @@ impl ReplayForge {
                     });
             });
             ui.label(&self.hotkeys.status);
-            ui.label("Tip: the hotkey always works while ReplayForge is focused.");
+            ui.horizontal(|ui| {
+                if ui
+                    .button("Enable global hotkey (portal)")
+                    .on_hover_text(
+                        "Uses the desktop permission dialog (xdg-desktop-portal). No sudo / input group.",
+                    )
+                    .clicked()
+                {
+                    match self.hotkeys.enable_portal(&self.config.hotkey) {
+                        Ok(trigger) => {
+                            self.config.portal_hotkey_enabled = true;
+                            self.persist_config();
+                            self.toast(format!("Portal global hotkey enabled ({trigger})"));
+                        }
+                        Err(error) => self.toast(format!("Portal hotkey failed: {error}")),
+                    }
+                }
+                if ui
+                    .add_enabled(
+                        self.hotkeys.is_portal_active(),
+                        egui::Button::new("Configure global hotkey…"),
+                    )
+                    .on_hover_text("Re-open the portal UI to change the bound shortcut")
+                    .clicked()
+                {
+                    match self.hotkeys.configure_portal() {
+                        Ok(()) => self.toast("Portal hotkey updated"),
+                        Err(error) => self.toast(format!("Configure failed: {error}")),
+                    }
+                }
+            });
+            ui.label(
+                "Focused hotkey always works. For in-game keys on Wayland, use Enable global hotkey (portal). \
+                 Advanced: input group / evdev — see status above.",
+            );
 
             ui.add_space(12.0);
             ui.heading("Desktop");

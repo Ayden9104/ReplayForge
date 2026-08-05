@@ -34,6 +34,9 @@ pub struct Detection {
     pub error: Option<String>,
     pub host_gsr: bool,
     pub flatpak_gsr: bool,
+    /// Apps currently available for GSR `app:` audio capture.
+    pub audio_apps: Vec<String>,
+    pub audio_apps_error: Option<String>,
 }
 
 impl Detection {
@@ -55,6 +58,8 @@ impl Detection {
             error: None,
             host_gsr,
             flatpak_gsr,
+            audio_apps: Vec::new(),
+            audio_apps_error: None,
         };
 
         if detection.backend.is_none() {
@@ -66,7 +71,9 @@ impl Detection {
             return detection;
         }
 
-        match list_monitors(detection.backend.unwrap()) {
+        let resolved = detection.backend.unwrap();
+
+        match list_monitors(resolved) {
             Ok(monitors) => {
                 if monitors.is_empty() {
                     detection.monitors = vec![Monitor {
@@ -83,6 +90,14 @@ impl Detection {
                     name: "screen".into(),
                     resolution: None,
                 }];
+            }
+        }
+
+        match list_application_audio(resolved) {
+            Ok(apps) => detection.audio_apps = apps,
+            Err(error) => {
+                detection.audio_apps_error = Some(error);
+                detection.audio_apps = Vec::new();
             }
         }
 
@@ -161,6 +176,73 @@ pub fn list_monitors(backend: ResolvedBackend) -> Result<Vec<Monitor>, String> {
     Ok(monitors)
 }
 
+pub fn list_application_audio(backend: ResolvedBackend) -> Result<Vec<String>, String> {
+    let output = match backend {
+        ResolvedBackend::Host => host_output("gpu-screen-recorder", &["--list-application-audio"]),
+        ResolvedBackend::Flatpak => host_output(
+            "flatpak",
+            &[
+                "run",
+                "--command=gpu-screen-recorder",
+                FLATPAK_GSR_ID,
+                "--list-application-audio",
+            ],
+        ),
+    }
+    .map_err(|e| format!("Failed to list application audio: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to list application audio: {stderr}"));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut apps = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Strip optional "app:" prefix if GSR prints it.
+        let name = line.strip_prefix("app:").unwrap_or(line).trim().to_string();
+        if !name.is_empty() && !apps.iter().any(|a| a == &name) {
+            apps.push(name);
+        }
+    }
+    apps.sort();
+    Ok(apps)
+}
+
+/// Human-friendly label for PipeWire/GSR application audio client names.
+pub fn friendly_audio_app_label(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    let friendly = match lower.as_str() {
+        s if s.contains("webrtc") || s.contains("voiceengine") || s.contains("voice engine") => {
+            "Discord (WebRTC)"
+        }
+        s if s.contains("discord") => "Discord",
+        s if s == "firefox" || s.starts_with("firefox") => "Firefox",
+        s if s.contains("chrome") || s.contains("chromium") => "Chrome / Chromium",
+        s if s.contains("spotify") => "Spotify",
+        s if s.contains("steam") => "Steam",
+        s if s.contains("wine") || s.contains("proton") => "Wine / Proton (game)",
+        s if s.contains("haruna") => "Haruna",
+        s if s.contains("vlc") => "VLC",
+        s if s.contains("mpv") => "mpv",
+        s if s.contains("obs") => "OBS",
+        s if s.contains("telegram") => "Telegram",
+        s if s.contains("slack") => "Slack",
+        s if s.contains("zoom") => "Zoom",
+        s if s.contains("teams") => "Teams",
+        _ => return raw.to_string(),
+    };
+    if friendly.eq_ignore_ascii_case(raw) {
+        raw.to_string()
+    } else {
+        format!("{friendly}  ({raw})")
+    }
+}
+
 pub fn clip_duration_secs(path: &PathBuf) -> Option<f64> {
     let path_str = path.to_string_lossy();
     let output = host_output(
@@ -181,10 +263,7 @@ pub fn clip_duration_secs(path: &PathBuf) -> Option<f64> {
         return None;
     }
 
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .ok()
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 pub fn format_duration(secs: f64) -> String {

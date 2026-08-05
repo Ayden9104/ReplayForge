@@ -7,10 +7,13 @@ license = "MIT"
 readme = "README.md"
 
 [dependencies]
+ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
+async-std = "1"
 chrono = "0.4.45"
 directories = "6"
 eframe = "0.32"
 evdev = "0.13.2"
+futures-util = "0.3"
 global-hotkey = "0.8.0"
 image = "0.25.10"
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }

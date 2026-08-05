@@ -80,49 +80,16 @@ impl Recorder {
         let fps = config.fps.to_string();
         let buffer = config.buffer_seconds.to_string();
         let output = config.output_dir.to_string_lossy().to_string();
+        let gsr_args = build_gsr_args(config, &fps, &buffer, &output);
+        let gsr_arg_refs: Vec<&str> = gsr_args.iter().map(String::as_str).collect();
 
         let mut cmd = match backend {
-            ResolvedBackend::Host => host_command(
-                "gpu-screen-recorder",
-                &[
-                    "-w",
-                    &config.display,
-                    "-f",
-                    &fps,
-                    "-r",
-                    &buffer,
-                    "-c",
-                    "mp4",
-                    "-replay-storage",
-                    "ram",
-                    "-k",
-                    &config.codec,
-                    "-o",
-                    &output,
-                ],
-            ),
-            ResolvedBackend::Flatpak => host_command(
-                "flatpak",
-                &[
-                    "run",
-                    "--command=gpu-screen-recorder",
-                    FLATPAK_GSR_ID,
-                    "-w",
-                    &config.display,
-                    "-f",
-                    &fps,
-                    "-r",
-                    &buffer,
-                    "-c",
-                    "mp4",
-                    "-replay-storage",
-                    "ram",
-                    "-k",
-                    &config.codec,
-                    "-o",
-                    &output,
-                ],
-            ),
+            ResolvedBackend::Host => host_command("gpu-screen-recorder", &gsr_arg_refs),
+            ResolvedBackend::Flatpak => {
+                let mut flatpak_args = vec!["run", "--command=gpu-screen-recorder", FLATPAK_GSR_ID];
+                flatpak_args.extend(gsr_arg_refs.iter().copied());
+                host_command("flatpak", &flatpak_args)
+            }
         };
 
         // Inherit stdout so GSR can print saved paths without pipe buffering issues.
@@ -130,9 +97,8 @@ impl Recorder {
         cmd.stdout(Stdio::inherit()).stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| {
-            let msg = format!(
-                "Failed to launch gpu-screen-recorder: {e}. Is it installed and runnable?"
-            );
+            let msg =
+                format!("Failed to launch gpu-screen-recorder: {e}. Is it installed and runnable?");
             self.last_error = Some(msg.clone());
             msg
         })?;
@@ -258,8 +224,9 @@ impl Recorder {
             // If our tracked child is still alive, the broad pkill may have missed —
             // still wait briefly for a file in case a signal landed.
             if !self.child_alive() && !gsr_process_alive() {
-                let msg = "Save failed: could not signal gpu-screen-recorder (is replay still running?)"
-                    .to_string();
+                let msg =
+                    "Save failed: could not signal gpu-screen-recorder (is replay still running?)"
+                        .to_string();
                 self.process = None;
                 self.expect_running = false;
                 self.crashed = true;
@@ -414,21 +381,14 @@ impl Recorder {
         }
 
         let final_path = if new_path.exists() {
-            let alt = format!(
-                "ReplayForge_{}.mp4",
-                now.format("%Y-%m-%d_%H-%M-%S_%f")
-            );
+            let alt = format!("ReplayForge_{}.mp4", now.format("%Y-%m-%d_%H-%M-%S_%f"));
             new_path.with_file_name(alt)
         } else {
             new_path
         };
 
-        fs::rename(&path, &final_path).map_err(|e| {
-            format!(
-                "Failed to rename clip to {}: {e}",
-                final_path.display()
-            )
-        })?;
+        fs::rename(&path, &final_path)
+            .map_err(|e| format!("Failed to rename clip to {}: {e}", final_path.display()))?;
         Ok(final_path)
     }
 
@@ -480,6 +440,55 @@ fn signal_gsr(signal: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+fn build_gsr_args(config: &Config, fps: &str, buffer: &str, output: &str) -> Vec<String> {
+    let mut args = vec![
+        "-w".into(),
+        config.display.clone(),
+        "-f".into(),
+        fps.to_string(),
+        "-r".into(),
+        buffer.to_string(),
+        "-c".into(),
+        "mp4".into(),
+        "-replay-storage".into(),
+        "ram".into(),
+        "-k".into(),
+        config.codec.clone(),
+        "-bm".into(),
+        "cbr".into(),
+        "-q".into(),
+        config.quality.bitrate_kbps().to_string(),
+        "-o".into(),
+        output.to_string(),
+    ];
+    let mut audio_sources = Vec::new();
+    if config.capture_system_audio {
+        let use_apps = config.system_audio_mode == crate::config::SystemAudioMode::Apps
+            && !config.audio_apps.is_empty();
+        if use_apps {
+            for name in &config.audio_apps {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                audio_sources.push(format!("app:{trimmed}"));
+            }
+        }
+        if audio_sources.is_empty() {
+            // All mode, or Apps mode with nothing selected → full desktop audio.
+            audio_sources.push("default_output".into());
+        }
+    }
+    if config.capture_microphone {
+        audio_sources.push("default_input".into());
+    }
+    if !audio_sources.is_empty() {
+        args.push("-a".into());
+        args.push(audio_sources.join("|"));
+    }
+    args
 }
 
 fn signal_gsr_save() -> bool {
@@ -621,7 +630,11 @@ fn find_new_or_updated_mp4(
         let is_new_path = !before.iter().any(|old| old.path == entry.path);
         let touched_after_save = entry
             .modified
-            .duration_since(save_started.checked_sub(Duration::from_secs(2)).unwrap_or(save_started))
+            .duration_since(
+                save_started
+                    .checked_sub(Duration::from_secs(2))
+                    .unwrap_or(save_started),
+            )
             .is_ok();
 
         if is_new_path || touched_after_save {

@@ -46,6 +46,17 @@ pub fn open_path(path: &Path) {
     }
 }
 
+/// Best-effort desktop notification (notify-send). Never fails the caller.
+pub fn notify_desktop(summary: &str, body: &str) {
+    let _ = host_command(
+        "notify-send",
+        &["--app-name=ReplayForge", "-i", "replayforge", summary, body],
+    )
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn();
+}
+
 pub fn default_videos_dir() -> PathBuf {
     if let Some(dirs) = directories::UserDirs::new() {
         if let Some(videos) = dirs.video_dir() {
