@@ -3,17 +3,16 @@ use crate::config::{
 };
 use crate::detect::{probe_clip_meta, Detection};
 use crate::host::open_path;
-use crate::hotkeys::parse_hotkey;
+use crate::hotkeys::HotkeyService;
 use crate::recorder::Recorder;
 use crate::tray::{TrayCommand, TrayHandle};
 use eframe::egui;
-use global_hotkey::{
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(PartialEq)]
@@ -39,8 +38,7 @@ pub struct ReplayForge {
     page: Page,
     textures: HashMap<PathBuf, egui::TextureHandle>,
     clip_meta: HashMap<PathBuf, (String, String)>,
-    hotkey_manager: GlobalHotKeyManager,
-    save_clip_hotkey_id: Option<u32>,
+    hotkeys: HotkeyService,
     detection: Detection,
     status: Option<Toast>,
     rename: Option<RenameState>,
@@ -49,6 +47,8 @@ pub struct ReplayForge {
     show_first_run: bool,
     settings_dirty: bool,
     quit_requested: bool,
+    saving: bool,
+    save_rx: Option<Receiver<Result<PathBuf, String>>>,
 }
 
 impl ReplayForge {
@@ -66,10 +66,7 @@ impl ReplayForge {
         }
 
         let show_first_run = config.is_first_run();
-
-        let hotkey_manager =
-            GlobalHotKeyManager::new().expect("failed to create global hotkey manager");
-        let save_clip_hotkey_id = register_hotkey(&hotkey_manager, &config.hotkey);
+        let hotkeys = HotkeyService::start(&config.hotkey);
 
         let tray = match crate::tray::create_tray() {
             Ok(tray) => Some(tray),
@@ -92,8 +89,7 @@ impl ReplayForge {
             page: Page::Home,
             textures: HashMap::new(),
             clip_meta: HashMap::new(),
-            hotkey_manager,
-            save_clip_hotkey_id,
+            hotkeys,
             detection,
             status: None,
             rename: None,
@@ -102,6 +98,8 @@ impl ReplayForge {
             show_first_run,
             settings_dirty: false,
             quit_requested: false,
+            saving: false,
+            save_rx: None,
         }
     }
 
@@ -152,40 +150,75 @@ impl ReplayForge {
     }
 
     fn save_clip_action(&mut self) {
-        let result = self.recorder.lock().unwrap().save_clip();
-        match result {
-            Ok(path) => {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("clip")
-                    .to_string();
-                self.toast(format!("Saved {name}"));
-                self.clips_dirty = true;
-                self.textures.clear();
-                self.clip_meta.clear();
-                self.page = Page::Clips;
+        if self.saving {
+            self.toast("Save already in progress…");
+            return;
+        }
+
+        let running = self.recorder.lock().unwrap().is_running();
+        if !running {
+            let msg = self
+                .recorder
+                .lock()
+                .unwrap()
+                .last_error()
+                .unwrap_or("Cannot save clip: replay is not running. Press Start Replay first.")
+                .to_string();
+            self.toast(msg);
+            return;
+        }
+
+        self.saving = true;
+        self.toast("Saving clip…");
+
+        let recorder = Arc::clone(&self.recorder);
+        let output_dir = self.config.output_dir.clone();
+        let (tx, rx) = mpsc::channel();
+        self.save_rx = Some(rx);
+
+        thread::spawn(move || {
+            let result = recorder.lock().unwrap().save_clip(&output_dir);
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_save_result(&mut self) {
+        let Some(rx) = &self.save_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(result) => {
+                self.save_rx = None;
+                self.saving = false;
+                match result {
+                    Ok(path) => {
+                        let name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("clip")
+                            .to_string();
+                        self.toast(format!("Saved {name}"));
+                        self.clips_dirty = true;
+                        self.textures.clear();
+                        self.clip_meta.clear();
+                        self.page = Page::Clips;
+                    }
+                    Err(error) => self.toast(error),
+                }
             }
-            Err(error) => self.toast(error),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.save_rx = None;
+                self.saving = false;
+                self.toast("Save failed: worker disconnected");
+            }
         }
     }
 
     fn apply_hotkey(&mut self) {
-        // Recreate manager so the previous binding is fully released.
-        match GlobalHotKeyManager::new() {
-            Ok(manager) => {
-                self.hotkey_manager = manager;
-                self.save_clip_hotkey_id =
-                    register_hotkey(&self.hotkey_manager, &self.config.hotkey);
-                if self.save_clip_hotkey_id.is_none() {
-                    self.toast(format!(
-                        "Could not register hotkey {}",
-                        self.config.hotkey
-                    ));
-                }
-            }
-            Err(error) => self.toast(format!("Hotkey manager error: {error}")),
-        }
+        self.hotkeys.rebind(&self.config.hotkey);
+        self.toast(self.hotkeys.status.clone());
     }
 
     fn apply_capture_settings(&mut self) {
@@ -215,21 +248,6 @@ impl ReplayForge {
         self.persist_config();
         self.show_first_run = false;
         self.toast("Setup complete — start replay from Home");
-    }
-}
-
-fn register_hotkey(manager: &GlobalHotKeyManager, spec: &str) -> Option<u32> {
-    let hotkey = parse_hotkey(spec)?;
-    let id = hotkey.id();
-    match manager.register(hotkey) {
-        Ok(()) => {
-            println!("Registered hotkey {spec}");
-            Some(id)
-        }
-        Err(error) => {
-            eprintln!("Hotkey registration failed for {spec}: {error}");
-            None
-        }
     }
 }
 
@@ -270,6 +288,14 @@ impl eframe::App for ReplayForge {
             }
         }
 
+        // Crash / unexpected exit notices.
+        let crash_notice = self.recorder.lock().unwrap().take_crash_notice();
+        if let Some(notice) = crash_notice {
+            self.toast(notice);
+        }
+
+        self.poll_save_result();
+
         if self.quit_requested {
             let _ = self.recorder.lock().unwrap().stop();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -286,13 +312,9 @@ impl eframe::App for ReplayForge {
             }
         }
 
-        // Global hotkeys
-        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            if let Some(id) = self.save_clip_hotkey_id {
-                if event.id == id && event.state == HotKeyState::Pressed {
-                    self.save_clip_action();
-                }
-            }
+        // Hotkeys: X11 global / evdev global / focused-window egui fallback.
+        if self.hotkeys.poll_global_pressed() || self.hotkeys.matches_egui(ctx) {
+            self.save_clip_action();
         }
 
         if let Some(toast) = &self.status {
@@ -315,8 +337,8 @@ impl eframe::App for ReplayForge {
                 ui.colored_label(egui::Color32::from_rgb(220, 80, 80), error);
             } else {
                 ui.label(format!(
-                    "Hotkey {} · {} · {}s buffer",
-                    self.config.hotkey, self.config.display, self.config.buffer_seconds
+                    "{} · {} · {}s",
+                    self.hotkeys.status, self.config.display, self.config.buffer_seconds
                 ));
             }
         });
@@ -420,7 +442,9 @@ impl ReplayForge {
 
         let replay_running = self.recorder.lock().unwrap().is_running();
 
-        ui.label(if replay_running {
+        ui.label(if self.saving {
+            "Saving clip…"
+        } else if replay_running {
             "Replay is running"
         } else {
             "Replay is stopped"
@@ -457,14 +481,18 @@ impl ReplayForge {
 
         if replay_running {
             ui.add_space(10.0);
+            let save_label = if self.saving { "Saving…" } else { "Save Clip" };
             if ui
-                .add_sized([220.0, 40.0], egui::Button::new("Save Clip"))
+                .add_enabled(
+                    !self.saving,
+                    egui::Button::new(save_label).min_size(egui::vec2(220.0, 40.0)),
+                )
                 .clicked()
             {
                 self.save_clip_action();
             }
             ui.add_space(6.0);
-            ui.label(format!("Or press {}", self.config.hotkey));
+            ui.label(format!("Or press {} (global or while focused)", self.config.hotkey));
         }
     }
 
@@ -820,7 +848,8 @@ impl ReplayForge {
                         }
                     });
             });
-            ui.label("Note: global hotkeys require X11 (or XWayland).");
+            ui.label(&self.hotkeys.status);
+            ui.label("Tip: the hotkey always works while ReplayForge is focused.");
 
             ui.add_space(12.0);
             ui.heading("Desktop");

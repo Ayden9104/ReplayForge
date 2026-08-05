@@ -82,7 +82,10 @@ first_run_complete = true
 
 ## Hotkeys & Wayland
 
-`global-hotkey` works on **X11**. On pure Wayland, register the same key in your compositor or use an XWayland session until a portal-based GlobalShortcuts backend is added.
+- The save hotkey always works while the ReplayForge window is focused.
+- On **X11**, global hotkeys use `global-hotkey`.
+- On **Wayland**, global hotkeys use `evdev` when your user can read `/dev/input` (typically: `sudo usermod -aG input $USER`, then re-login).
+- Without input-group access on Wayland, use the in-app Save button or focus ReplayForge and press the hotkey.
 
 ## License
 
