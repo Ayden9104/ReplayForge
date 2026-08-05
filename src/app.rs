@@ -1,26 +1,32 @@
 //! ReplayForge egui application shell (home, clips, settings, hotkeys).
-use crate::clips::{extract_filmstrip_jpeg, extract_frame_png, filmstrip_frame_count, trim_clip};
+use crate::clips::{
+    extract_filmstrip_jpeg, extract_frame_png, extract_waveform_peaks, filmstrip_frame_count,
+    trim_clip, waveform_peak_count,
+};
 use crate::config::{
     Backend, Config, SystemAudioMode, codec_choices, hotkey_choices, path_display, quality_choices,
     set_autostart,
 };
 use crate::detect::{
-    Detection, clip_duration_secs, format_duration, friendly_audio_app_label, probe_clip_meta,
+    Detection, clip_duration_secs, format_bytes, format_duration, friendly_audio_app_label,
+    probe_clip_meta,
 };
 use crate::host::{notify_desktop, open_path};
 use crate::hotkeys::HotkeyService;
 use crate::recorder::Recorder;
 use crate::theme;
 use crate::tray::{TrayCommand, TrayHandle};
-use crate::trim_playback::{TrimFrame, TrimPlayback};
+use crate::trim_playback::TrimPlayback;
 use eframe::egui;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
+
+const CLIP_LOAD_MAX_INFLIGHT: usize = 3;
 
 #[derive(PartialEq)]
 enum Page {
@@ -97,6 +103,18 @@ pub struct ReplayForge {
     trim_filmstrip_pending: bool,
     trim_filmstrip_width: f32,
     trim_filmstrip_target_width: f32,
+    trim_waveform: Option<Vec<f32>>,
+    trim_waveform_rx: Option<Receiver<Result<Vec<f32>, String>>>,
+    trim_waveform_pending: bool,
+    trim_muted: bool,
+    trim_volume: f32,
+    trim_audio_error: Option<String>,
+    clip_meta_tx: Sender<(PathBuf, (String, String))>,
+    clip_meta_rx: Receiver<(PathBuf, (String, String))>,
+    clip_meta_inflight: HashSet<PathBuf>,
+    clip_thumb_tx: Sender<(PathBuf, Result<(u32, u32, Vec<u8>), String>)>,
+    clip_thumb_rx: Receiver<(PathBuf, Result<(u32, u32, Vec<u8>), String>)>,
+    clip_thumb_inflight: HashSet<PathBuf>,
     clip_sort: ClipSort,
     clip_filter: String,
 }
@@ -127,6 +145,9 @@ impl ReplayForge {
 
         // Sync autostart file with config on launch.
         let _ = set_autostart(config.autostart);
+
+        let (clip_meta_tx, clip_meta_rx) = mpsc::channel();
+        let (clip_thumb_tx, clip_thumb_rx) = mpsc::channel();
 
         let mut app = Self {
             config,
@@ -162,6 +183,18 @@ impl ReplayForge {
             trim_filmstrip_pending: false,
             trim_filmstrip_width: 0.0,
             trim_filmstrip_target_width: 0.0,
+            trim_waveform: None,
+            trim_waveform_rx: None,
+            trim_waveform_pending: false,
+            trim_muted: false,
+            trim_volume: 1.0,
+            trim_audio_error: None,
+            clip_meta_tx,
+            clip_meta_rx,
+            clip_meta_inflight: HashSet::new(),
+            clip_thumb_tx,
+            clip_thumb_rx,
+            clip_thumb_inflight: HashSet::new(),
             clip_sort: ClipSort::Newest,
             clip_filter: String::new(),
         };
@@ -272,8 +305,7 @@ impl ReplayForge {
                         self.toast(msg.clone());
                         notify_desktop("Clip saved", &format!("{name}\n{}", path.display()));
                         self.clips_dirty = true;
-                        self.textures.clear();
-                        self.clip_meta.clear();
+                        self.clear_clip_caches();
                         self.page = Page::Clips;
                     }
                     Err(error) => self.toast(error),
@@ -299,7 +331,7 @@ impl ReplayForge {
         }
         self.clear_trim_previews();
         self.trim = Some(TrimState {
-            path,
+            path: path.clone(),
             duration_secs: duration,
             start_secs: 0.0,
             end_secs: duration,
@@ -307,9 +339,67 @@ impl ReplayForge {
         });
         self.trim_preview_last_request = Instant::now() - Duration::from_millis(200);
         self.trim_preview_error = None;
+        self.trim_audio_error = None;
         self.page = Page::Trim;
         self.trim_filmstrip_width = 0.0;
         self.trim_filmstrip_target_width = 0.0;
+        self.schedule_trim_waveform(duration);
+    }
+
+    fn schedule_trim_waveform(&mut self, duration: f64) {
+        let Some(state) = &self.trim else {
+            return;
+        };
+        let path = state.path.clone();
+        // Use a mid-size peak count; redraw scales visually even if peak count differs.
+        let peak_count = waveform_peak_count(800.0);
+        let (tx, rx) = mpsc::channel();
+        self.trim_waveform_rx = Some(rx);
+        self.trim_waveform_pending = true;
+        self.trim_waveform = None;
+
+        thread::spawn(move || {
+            let result = extract_waveform_peaks(&path, duration, peak_count);
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_trim_waveform(&mut self) {
+        if let Some(rx) = &self.trim_waveform_rx {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.trim_waveform_rx = None;
+                    self.trim_waveform_pending = false;
+                    match result {
+                        Ok(peaks) => {
+                            self.trim_waveform = Some(peaks);
+                        }
+                        Err(error) => {
+                            eprintln!("Waveform: {error}");
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.trim_waveform_rx = None;
+                    self.trim_waveform_pending = false;
+                }
+            }
+        }
+    }
+
+    fn trim_effective_volume(&self) -> f32 {
+        if self.trim_muted {
+            0.0
+        } else {
+            self.trim_volume.clamp(0.0, 1.0)
+        }
+    }
+
+    fn apply_trim_volume(&self) {
+        if let Some(playback) = &self.trim_playback {
+            playback.set_volume(self.trim_effective_volume());
+        }
     }
 
     fn schedule_trim_filmstrip(&mut self, timeline_width: f32) {
@@ -381,10 +471,32 @@ impl ReplayForge {
             self.toast("Invalid trim range");
             return;
         }
-        match TrimPlayback::start(&state.path, state.start_secs, state.end_secs) {
+
+        // Play from playhead, clamped into the keep range.
+        let mut play_from = state.preview_secs.clamp(state.start_secs, state.end_secs);
+        if play_from >= state.end_secs - 0.05 {
+            play_from = state.start_secs;
+        }
+        if state.end_secs - play_from < 0.05 {
+            self.toast("Nothing left to play in selection");
+            return;
+        }
+
+        match TrimPlayback::start(&state.path, play_from, state.end_secs) {
             Ok(playback) => {
                 if !playback.audio_enabled {
-                    self.toast("Audio unavailable — playing video only");
+                    let reason = playback
+                        .audio_error
+                        .clone()
+                        .unwrap_or_else(|| "unknown error".into());
+                    self.trim_audio_error = Some(reason.clone());
+                    self.toast(format!("Audio unavailable — playing video only ({reason})"));
+                } else {
+                    self.trim_audio_error = None;
+                }
+                playback.set_volume(self.trim_effective_volume());
+                if let Some(trim) = &mut self.trim {
+                    trim.preview_secs = play_from;
                 }
                 self.trim_play_start = Some(Instant::now());
                 self.trim_playback = Some(playback);
@@ -415,6 +527,10 @@ impl ReplayForge {
         self.trim_filmstrip_pending = false;
         self.trim_filmstrip_width = 0.0;
         self.trim_filmstrip_target_width = 0.0;
+        self.trim_waveform = None;
+        self.trim_waveform_rx = None;
+        self.trim_waveform_pending = false;
+        self.trim_audio_error = None;
     }
 
     fn trim_preview_stale(&self) -> bool {
@@ -491,29 +607,33 @@ impl ReplayForge {
             .map(|start| Instant::now().duration_since(start).as_secs_f64())
             .unwrap_or(0.0);
 
-        let should_stop = {
+        let (should_stop, end_secs) = {
             let Some(playback) = &self.trim_playback else {
                 return;
             };
-            elapsed >= playback.selection_secs
+            (
+                elapsed >= playback.selection_secs,
+                playback.start_secs + playback.selection_secs,
+            )
         };
 
         if should_stop {
+            if let Some(state) = &mut self.trim {
+                state.preview_secs = end_secs;
+            }
+            self.trim_loaded_preview = Some(end_secs);
             self.stop_trim_playback();
             return;
         }
 
-        if let Some(playback) = &self.trim_playback {
+        if let Some(playback) = &mut self.trim_playback {
+            let target =
+                (playback.start_secs + elapsed).min(playback.start_secs + playback.selection_secs);
             if let Some(state) = &mut self.trim {
-                state.preview_secs = (playback.start_secs + elapsed)
-                    .min(playback.start_secs + playback.selection_secs);
+                state.preview_secs = target;
             }
 
-            let mut latest: Option<TrimFrame> = None;
-            while let Ok(frame) = playback.frame_rx.try_recv() {
-                latest = Some(frame);
-            }
-            if let Some(frame) = latest {
+            if let Some(frame) = playback.take_frame_for_time(target) {
                 if let Some(tex) = Self::load_trim_texture_rgba(
                     ctx,
                     "trim_scrub",
@@ -628,6 +748,7 @@ impl ReplayForge {
         drag_handle: &mut Option<TrimHandle>,
         filmstrip: Option<&egui::TextureHandle>,
         filmstrip_loading: bool,
+        waveform: Option<&[f32]>,
         timeline_width: f32,
         timeline_height: f32,
     ) -> bool {
@@ -687,6 +808,26 @@ impl ReplayForge {
                 egui::FontId::proportional(12.0),
                 theme::text_muted(),
             );
+        }
+
+        if let Some(peaks) = waveform {
+            if !peaks.is_empty() {
+                let wave_color = egui::Color32::from_rgba_unmultiplied(100, 200, 255, 110);
+                let mid_y = rect.center().y;
+                let max_amp = (rect.height() * 0.42).max(4.0);
+                let n = peaks.len();
+                for (i, &peak) in peaks.iter().enumerate() {
+                    let x0 = rect.left() + rect.width() * (i as f32 / n as f32);
+                    let x1 = rect.left() + rect.width() * ((i + 1) as f32 / n as f32);
+                    let bar_w = (x1 - x0).max(1.0);
+                    let amp = peak.clamp(0.0, 1.0) * max_amp;
+                    let bar = egui::Rect::from_center_size(
+                        egui::pos2(x0 + bar_w * 0.5, mid_y),
+                        egui::vec2(bar_w * 0.85, amp * 2.0),
+                    );
+                    painter.rect_filled(bar, 1.0, wave_color);
+                }
+            }
         }
 
         let start_x = x_at_time(*start_secs);
@@ -854,8 +995,7 @@ impl ReplayForge {
                         self.clear_trim_previews();
                         self.page = Page::Clips;
                         self.clips_dirty = true;
-                        self.textures.clear();
-                        self.clip_meta.clear();
+                        self.clear_clip_caches();
                     }
                     Err(error) => self.toast(error),
                 }
@@ -951,8 +1091,10 @@ impl eframe::App for ReplayForge {
         self.poll_save_result();
         self.poll_trim_result();
         self.poll_trim_filmstrip(ctx);
+        self.poll_trim_waveform();
         self.poll_trim_playback(ctx);
         self.poll_trim_preview(ctx);
+        self.poll_clip_loads(ctx);
 
         if self.quit_requested {
             let _ = self.recorder.lock().unwrap().stop();
@@ -1000,7 +1142,14 @@ impl eframe::App for ReplayForge {
                 } else if self.trimming {
                     ui.label("Trimming…");
                 } else {
-                    ui.label("Drag handles or click timeline · Escape to go back");
+                    let mut hint =
+                        String::from("Space play/pause · ←/→ scrub · Drag handles · Escape back");
+                    if self.trim_muted {
+                        hint.push_str(" · Muted");
+                    } else if let Some(err) = &self.trim_audio_error {
+                        hint.push_str(&format!(" · Audio off ({err})"));
+                    }
+                    ui.label(hint);
                 }
             });
             return;
@@ -1236,40 +1385,128 @@ impl ReplayForge {
         });
     }
 
-    fn ui_clips(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading("Clips");
-            if ui.button("Refresh").clicked() {
-                self.textures.clear();
-                self.clip_meta.clear();
-                self.clips_dirty = true;
-            }
-            if ui.button("Open Folder").clicked() {
-                let _ = self.config.ensure_output_dir();
-                open_path(&self.config.output_dir);
-            }
+    fn clear_clip_caches(&mut self) {
+        self.textures.clear();
+        self.clip_meta.clear();
+        self.clip_meta_inflight.clear();
+        self.clip_thumb_inflight.clear();
+    }
+
+    fn clip_load_inflight_count(&self) -> usize {
+        self.clip_meta_inflight.len() + self.clip_thumb_inflight.len()
+    }
+
+    fn schedule_clip_meta(&mut self, path: PathBuf) {
+        if self.clip_meta.contains_key(&path) || self.clip_meta_inflight.contains(&path) {
+            return;
+        }
+        if self.clip_load_inflight_count() >= CLIP_LOAD_MAX_INFLIGHT {
+            return;
+        }
+        self.clip_meta_inflight.insert(path.clone());
+        let tx = self.clip_meta_tx.clone();
+        thread::spawn(move || {
+            let meta = probe_clip_meta(&path);
+            let _ = tx.send((path, meta));
         });
-        ui.horizontal(|ui| {
-            ui.label("Sort");
-            egui::ComboBox::from_id_salt("clip_sort")
-                .selected_text(match self.clip_sort {
-                    ClipSort::Newest => "Newest",
-                    ClipSort::Name => "Name",
-                    ClipSort::Largest => "Largest",
+    }
+
+    fn schedule_clip_thumb(&mut self, thumb_path: PathBuf) {
+        if self.textures.contains_key(&thumb_path) || self.clip_thumb_inflight.contains(&thumb_path)
+        {
+            return;
+        }
+        if !thumb_path.exists() {
+            return;
+        }
+        if self.clip_load_inflight_count() >= CLIP_LOAD_MAX_INFLIGHT {
+            return;
+        }
+        self.clip_thumb_inflight.insert(thumb_path.clone());
+        let tx = self.clip_thumb_tx.clone();
+        thread::spawn(move || {
+            let result = image::open(&thumb_path)
+                .map(|image| {
+                    let rgba = image.to_rgba8();
+                    (rgba.width(), rgba.height(), rgba.into_raw())
                 })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.clip_sort, ClipSort::Newest, "Newest");
-                    ui.selectable_value(&mut self.clip_sort, ClipSort::Name, "Name");
-                    ui.selectable_value(&mut self.clip_sort, ClipSort::Largest, "Largest");
-                });
-            ui.label("Filter");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.clip_filter)
-                    .desired_width(180.0)
-                    .hint_text("Search filename…"),
-            );
+                .map_err(|e| e.to_string());
+            let _ = tx.send((thumb_path, result));
         });
-        ui.separator();
+    }
+
+    fn poll_clip_loads(&mut self, ctx: &egui::Context) {
+        let mut got_any = false;
+
+        while let Ok((path, meta)) = self.clip_meta_rx.try_recv() {
+            self.clip_meta_inflight.remove(&path);
+            self.clip_meta.insert(path, meta);
+            got_any = true;
+        }
+
+        while let Ok((thumb_path, result)) = self.clip_thumb_rx.try_recv() {
+            self.clip_thumb_inflight.remove(&thumb_path);
+            match result {
+                Ok((width, height, rgba)) => {
+                    let texture = ctx.load_texture(
+                        thumb_path.to_string_lossy(),
+                        egui::ColorImage::from_rgba_unmultiplied(
+                            [width as usize, height as usize],
+                            &rgba,
+                        ),
+                        Default::default(),
+                    );
+                    self.textures.insert(thumb_path, texture);
+                }
+                Err(error) => {
+                    eprintln!("Clip thumbnail decode failed: {error}");
+                }
+            }
+            got_any = true;
+        }
+
+        if got_any {
+            ctx.request_repaint();
+        }
+    }
+
+    fn ui_clips(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Clips");
+        ui.add_space(8.0);
+
+        theme::section_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.add(theme::secondary_button("Refresh")).clicked() {
+                    self.clear_clip_caches();
+                    self.clips_dirty = true;
+                }
+                if ui.add(theme::secondary_button("Open Folder")).clicked() {
+                    let _ = self.config.ensure_output_dir();
+                    open_path(&self.config.output_dir);
+                }
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("Sort").color(theme::text_muted()));
+                egui::ComboBox::from_id_salt("clip_sort")
+                    .selected_text(match self.clip_sort {
+                        ClipSort::Newest => "Newest",
+                        ClipSort::Name => "Name",
+                        ClipSort::Largest => "Largest",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.clip_sort, ClipSort::Newest, "Newest");
+                        ui.selectable_value(&mut self.clip_sort, ClipSort::Name, "Name");
+                        ui.selectable_value(&mut self.clip_sort, ClipSort::Largest, "Largest");
+                    });
+                ui.label(egui::RichText::new("Filter").color(theme::text_muted()));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.clip_filter)
+                        .desired_width(180.0)
+                        .hint_text("Search filename…"),
+                );
+            });
+        });
+
+        ui.add_space(12.0);
 
         let clips_folder = self.config.output_dir.clone();
         let _ = self.clips_dirty;
@@ -1317,11 +1554,22 @@ impl ReplayForge {
                 }
 
                 if clips.is_empty() {
-                    if filter.is_empty() {
-                        ui.label("No clips yet. Start replay and hit Save Clip.");
-                    } else {
-                        ui.label("No clips match that filter.");
-                    }
+                    theme::section_frame().show(ui, |ui| {
+                        ui.set_max_width(420.0);
+                        if filter.is_empty() {
+                            ui.label(
+                                egui::RichText::new(
+                                    "No clips yet. Start replay and hit Save Clip.",
+                                )
+                                .color(theme::text_muted()),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new("No clips match that filter.")
+                                    .color(theme::text_muted()),
+                            );
+                        }
+                    });
                     return;
                 }
 
@@ -1334,9 +1582,23 @@ impl ReplayForge {
                 let mut cancel_rename = false;
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    let gap = 16.0;
+                    let min_card_outer = 300.0;
+                    // Matches theme::card_frame() Margin::same(14) on left+right.
+                    let frame_pad_x = 28.0;
+                    let available = ui.available_width();
+                    let columns = ((available + gap) / (min_card_outer + gap))
+                        .floor()
+                        .max(1.0) as usize;
+                    let card_outer =
+                        (available - gap * columns.saturating_sub(1) as f32) / columns as f32;
+                    let card_inner = (card_outer - frame_pad_x).max(160.0);
+                    let thumb_w = card_inner;
+                    let thumb_h = thumb_w * 9.0 / 16.0;
+
                     egui::Grid::new("clips_grid")
-                        .num_columns(2)
-                        .spacing([20.0, 20.0])
+                        .num_columns(columns)
+                        .spacing([gap, gap])
                         .show(ui, |ui| {
                             for (index, clip_path) in clips.iter().enumerate() {
                                 let clip_name = clip_path
@@ -1345,58 +1607,83 @@ impl ReplayForge {
                                     .unwrap_or("Unknown clip")
                                     .to_string();
 
-                                let (duration_label, size_label) =
-                                    if let Some(cached) = self.clip_meta.get(clip_path) {
-                                        cached.clone()
-                                    } else {
-                                        let probed = probe_clip_meta(clip_path);
-                                        self.clip_meta.insert(clip_path.clone(), probed.clone());
-                                        probed
-                                    };
-
                                 let thumbnail_path = clip_path.with_extension("png");
+                                let meta_cached = self.clip_meta.get(clip_path).cloned();
+                                let size_fallback = fs::metadata(clip_path)
+                                    .map(|m| format_bytes(m.len()))
+                                    .unwrap_or_else(|_| "?".into());
 
-                                ui.group(|ui| {
-                                    ui.set_min_width(360.0);
+                                theme::card_frame().show(ui, |ui| {
+                                    ui.set_min_width(card_inner);
+                                    ui.set_max_width(card_inner);
                                     ui.vertical(|ui| {
-                                        if thumbnail_path.exists() {
-                                            if !self.textures.contains_key(&thumbnail_path) {
-                                                if let Ok(image) = image::open(&thumbnail_path) {
-                                                    let size = [
-                                                        image.width() as usize,
-                                                        image.height() as usize,
-                                                    ];
-                                                    let image_buffer = image.to_rgba8();
-                                                    let texture = ui.ctx().load_texture(
-                                                        thumbnail_path.to_string_lossy(),
-                                                        egui::ColorImage::from_rgba_unmultiplied(
-                                                            size,
-                                                            &image_buffer,
-                                                        ),
-                                                        Default::default(),
-                                                    );
-                                                    self.textures
-                                                        .insert(thumbnail_path.clone(), texture);
-                                                }
-                                            }
+                                        let has_texture =
+                                            self.textures.contains_key(&thumbnail_path);
+                                        let thumb_exists = thumbnail_path.exists();
 
+                                        if has_texture {
                                             if let Some(texture) =
                                                 self.textures.get(&thumbnail_path)
                                             {
                                                 let response = ui.add(
-                                                    egui::Image::new(texture).fit_to_exact_size(
-                                                        egui::vec2(320.0, 180.0),
-                                                    ),
+                                                    egui::Image::new(texture)
+                                                        .fit_to_exact_size(egui::vec2(
+                                                            thumb_w, thumb_h,
+                                                        ))
+                                                        .corner_radius(6.0),
                                                 );
                                                 if response.clicked() {
                                                     open_path_req = Some(clip_path.clone());
                                                 }
+                                                if ui.is_rect_visible(response.rect)
+                                                    && meta_cached.is_none()
+                                                {
+                                                    self.schedule_clip_meta(clip_path.clone());
+                                                }
                                             }
                                         } else {
-                                            ui.label("No thumbnail");
+                                            let (thumb_rect, thumb_response) = ui
+                                                .allocate_exact_size(
+                                                    egui::vec2(thumb_w, thumb_h),
+                                                    egui::Sense::click(),
+                                                );
+                                            ui.painter().rect_filled(
+                                                thumb_rect,
+                                                6.0,
+                                                theme::surface_track(),
+                                            );
+                                            let placeholder = if thumb_exists {
+                                                if self
+                                                    .clip_thumb_inflight
+                                                    .contains(&thumbnail_path)
+                                                {
+                                                    "Loading…"
+                                                } else {
+                                                    "…"
+                                                }
+                                            } else {
+                                                "No thumbnail"
+                                            };
+                                            ui.painter().text(
+                                                thumb_rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                placeholder,
+                                                egui::FontId::proportional(13.0),
+                                                theme::text_muted(),
+                                            );
+                                            if thumb_response.clicked() && thumb_exists {
+                                                open_path_req = Some(clip_path.clone());
+                                            }
+                                            let visible = ui.is_rect_visible(thumb_rect);
+                                            if visible && thumb_exists {
+                                                self.schedule_clip_thumb(thumbnail_path.clone());
+                                            }
+                                            if visible && meta_cached.is_none() {
+                                                self.schedule_clip_meta(clip_path.clone());
+                                            }
                                         }
 
-                                        ui.add_space(5.0);
+                                        ui.add_space(8.0);
 
                                         let renaming = self
                                             .rename
@@ -1407,35 +1694,61 @@ impl ReplayForge {
                                             if let Some(state) = self.rename.as_mut() {
                                                 ui.text_edit_singleline(&mut state.text);
                                                 ui.horizontal(|ui| {
-                                                    if ui.button("Save").clicked() {
+                                                    if ui
+                                                        .add(theme::primary_button("Save"))
+                                                        .clicked()
+                                                    {
                                                         finish_rename = Some((
                                                             state.path.clone(),
                                                             state.text.clone(),
                                                         ));
                                                     }
-                                                    if ui.button("Cancel").clicked() {
+                                                    if ui
+                                                        .add(theme::secondary_button("Cancel"))
+                                                        .clicked()
+                                                    {
                                                         cancel_rename = true;
                                                     }
                                                 });
                                             }
                                         } else {
-                                            ui.label(&clip_name);
-                                            ui.label(format!("{duration_label} · {size_label}"));
-                                            ui.horizontal(|ui| {
-                                                if ui.button("Open").clicked() {
+                                            ui.label(
+                                                egui::RichText::new(&clip_name).strong().size(14.0),
+                                            );
+                                            let meta_line = if let Some((duration, size)) =
+                                                &meta_cached
+                                            {
+                                                format!("{duration} · {size}")
+                                            } else if self.clip_meta_inflight.contains(clip_path) {
+                                                format!("Loading… · {size_fallback}")
+                                            } else {
+                                                format!("--:-- · {size_fallback}")
+                                            };
+                                            ui.label(
+                                                egui::RichText::new(meta_line)
+                                                    .color(theme::text_muted())
+                                                    .size(12.0),
+                                            );
+                                            ui.add_space(4.0);
+                                            ui.horizontal_wrapped(|ui| {
+                                                if ui.add(theme::secondary_button("Open")).clicked()
+                                                {
                                                     open_path_req = Some(clip_path.clone());
                                                 }
                                                 if ui
-                                                    .button("Copy path")
+                                                    .add(theme::secondary_button("Copy path"))
                                                     .on_hover_text("Copy full path to clipboard")
                                                     .clicked()
                                                 {
                                                     copy_path_req = Some(clip_path.clone());
                                                 }
-                                                if ui.button("Rename").clicked() {
+                                                if ui
+                                                    .add(theme::secondary_button("Rename"))
+                                                    .clicked()
+                                                {
                                                     start_rename = Some(clip_path.clone());
                                                 }
-                                                if ui.button("Trim").clicked() {
+                                                if ui.add(theme::primary_button("Trim")).clicked() {
                                                     start_trim_req = Some(clip_path.clone());
                                                 }
                                                 if ui.button("Delete").clicked() {
@@ -1449,9 +1762,13 @@ impl ReplayForge {
                                     });
                                 });
 
-                                if index % 2 == 1 {
+                                if (index + 1) % columns == 0 {
                                     ui.end_row();
                                 }
+                            }
+
+                            if !clips.is_empty() && clips.len() % columns != 0 {
+                                ui.end_row();
                             }
                         });
                 });
@@ -1493,8 +1810,7 @@ impl ReplayForge {
                                 if old_thumb.exists() {
                                     let _ = fs::rename(&old_thumb, &new_thumb);
                                 }
-                                self.textures.clear();
-                                self.clip_meta.clear();
+                                self.clear_clip_caches();
                                 self.toast("Clip renamed");
                             }
                             Err(error) => self.toast(format!("Rename failed: {error}")),
@@ -1510,8 +1826,7 @@ impl ReplayForge {
                         if thumbnail_path.exists() {
                             let _ = fs::remove_file(&thumbnail_path);
                         }
-                        self.textures.clear();
-                        self.clip_meta.clear();
+                        self.clear_clip_caches();
                         self.toast("Clip deleted");
                     }
                 }
@@ -1524,357 +1839,428 @@ impl ReplayForge {
 
     fn ui_settings(&mut self, ui: &mut egui::Ui) {
         ui.heading("Settings");
-        ui.separator();
+        ui.add_space(8.0);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.heading("Capture");
+            theme::section_frame().show(ui, |ui| {
+                ui.heading("Capture");
+                ui.add_space(8.0);
 
-            ui.horizontal(|ui| {
-                ui.label("Display");
-                egui::ComboBox::from_id_salt("settings_display")
-                    .selected_text(&self.config.display)
-                    .show_ui(ui, |ui| {
-                        for monitor in &self.detection.monitors {
-                            if ui
-                                .selectable_value(
-                                    &mut self.config.display,
-                                    monitor.name.clone(),
-                                    monitor.label(),
-                                )
-                                .changed()
-                            {
-                                self.settings_dirty = true;
-                            }
-                        }
-                    });
-                if ui.button("Refresh").clicked() {
-                    self.detection = Detection::refresh(self.config.backend);
-                    self.toast("Displays refreshed");
-                }
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("FPS");
-                if ui
-                    .add(egui::DragValue::new(&mut self.config.fps).range(15..=240))
-                    .changed()
-                {
-                    self.settings_dirty = true;
-                }
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("Buffer (seconds)");
-                if ui
-                    .add(egui::DragValue::new(&mut self.config.buffer_seconds).range(5..=600))
-                    .changed()
-                {
-                    self.settings_dirty = true;
-                }
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("Codec");
-                egui::ComboBox::from_id_salt("settings_codec")
-                    .selected_text(&self.config.codec)
-                    .show_ui(ui, |ui| {
-                        for codec in codec_choices() {
-                            if ui
-                                .selectable_value(
-                                    &mut self.config.codec,
-                                    (*codec).to_string(),
-                                    *codec,
-                                )
-                                .changed()
-                            {
-                                self.settings_dirty = true;
-                            }
-                        }
-                    });
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("Quality");
-                egui::ComboBox::from_id_salt("settings_quality")
-                    .selected_text(format!(
-                        "{} ({} kbps)",
-                        self.config.quality.label(),
-                        self.config.quality.bitrate_kbps()
-                    ))
-                    .show_ui(ui, |ui| {
-                        for preset in quality_choices() {
-                            if ui
-                                .selectable_value(
-                                    &mut self.config.quality,
-                                    *preset,
-                                    format!("{} ({} kbps)", preset.label(), preset.bitrate_kbps()),
-                                )
-                                .changed()
-                            {
-                                self.settings_dirty = true;
-                            }
-                        }
-                    });
-            });
-            ui.label("Quality uses GSR constant bitrate (recommended for replay buffer).");
-
-            if ui
-                .checkbox(
-                    &mut self.config.capture_system_audio,
-                    "Capture system audio",
-                )
-                .on_hover_text(
-                    "Records desktop/game audio via GPU Screen Recorder (all output or selected apps)",
-                )
-                .changed()
-            {
-                self.apply_capture_settings();
-            }
-            if ui
-                .checkbox(&mut self.config.capture_microphone, "Capture microphone")
-                .on_hover_text(
-                    "Records the default mic via GPU Screen Recorder (default_input). \
-                     Merged with system audio into one track when both are enabled.",
-                )
-                .changed()
-            {
-                self.apply_capture_settings();
-            }
-
-            ui.add_enabled_ui(self.config.capture_system_audio, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("System audio source");
+                    ui.label("Display");
+                    egui::ComboBox::from_id_salt("settings_display")
+                        .selected_text(&self.config.display)
+                        .show_ui(ui, |ui| {
+                            for monitor in &self.detection.monitors {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.config.display,
+                                        monitor.name.clone(),
+                                        monitor.label(),
+                                    )
+                                    .changed()
+                                {
+                                    self.settings_dirty = true;
+                                }
+                            }
+                        });
                     if ui
-                        .selectable_value(
-                            &mut self.config.system_audio_mode,
-                            SystemAudioMode::All,
-                            "All system audio",
-                        )
-                        .changed()
+                        .add(theme::secondary_button("Refresh"))
+                        .clicked()
                     {
-                        self.apply_capture_settings();
-                    }
-                    if ui
-                        .selectable_value(
-                            &mut self.config.system_audio_mode,
-                            SystemAudioMode::Apps,
-                            "Selected apps",
-                        )
-                        .changed()
-                    {
-                        self.apply_capture_settings();
+                        self.detection = Detection::refresh(self.config.backend);
+                        self.toast("Displays refreshed");
                     }
                 });
 
-                if self.config.system_audio_mode == SystemAudioMode::Apps {
-                    ui.horizontal(|ui| {
-                        ui.label("Applications");
-                        if ui.button("Refresh apps").clicked() {
-                            self.detection = Detection::refresh(self.config.backend);
-                            if let Some(error) = &self.detection.audio_apps_error {
-                                self.toast(error.clone());
-                            } else {
-                                self.toast(format!(
-                                    "Found {} app(s) with audio",
-                                    self.detection.audio_apps.len()
-                                ));
+                ui.horizontal(|ui| {
+                    ui.label("FPS");
+                    if ui
+                        .add(egui::DragValue::new(&mut self.config.fps).range(15..=240))
+                        .changed()
+                    {
+                        self.settings_dirty = true;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Buffer (seconds)");
+                    if ui
+                        .add(egui::DragValue::new(&mut self.config.buffer_seconds).range(5..=600))
+                        .changed()
+                    {
+                        self.settings_dirty = true;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Codec");
+                    egui::ComboBox::from_id_salt("settings_codec")
+                        .selected_text(&self.config.codec)
+                        .show_ui(ui, |ui| {
+                            for codec in codec_choices() {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.config.codec,
+                                        (*codec).to_string(),
+                                        *codec,
+                                    )
+                                    .changed()
+                                {
+                                    self.settings_dirty = true;
+                                }
                             }
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Quality");
+                    egui::ComboBox::from_id_salt("settings_quality")
+                        .selected_text(format!(
+                            "{} ({} kbps)",
+                            self.config.quality.label(),
+                            self.config.quality.bitrate_kbps()
+                        ))
+                        .show_ui(ui, |ui| {
+                            for preset in quality_choices() {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.config.quality,
+                                        *preset,
+                                        format!(
+                                            "{} ({} kbps)",
+                                            preset.label(),
+                                            preset.bitrate_kbps()
+                                        ),
+                                    )
+                                    .changed()
+                                {
+                                    self.settings_dirty = true;
+                                }
+                            }
+                        });
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Quality uses GSR constant bitrate (recommended for replay buffer).",
+                    )
+                    .color(theme::text_muted())
+                    .size(12.0),
+                );
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("Backend");
+                    let backend_label = match self.config.backend {
+                        Backend::Auto => "Auto",
+                        Backend::Host => "Host",
+                        Backend::Flatpak => "Flatpak",
+                    };
+                    egui::ComboBox::from_id_salt("settings_backend")
+                        .selected_text(backend_label)
+                        .show_ui(ui, |ui| {
+                            for (label, value) in [
+                                ("Auto", Backend::Auto),
+                                ("Host", Backend::Host),
+                                ("Flatpak", Backend::Flatpak),
+                            ] {
+                                if ui
+                                    .selectable_value(&mut self.config.backend, value, label)
+                                    .changed()
+                                {
+                                    self.detection = Detection::refresh(self.config.backend);
+                                    self.settings_dirty = true;
+                                }
+                            }
+                        });
+                });
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Detected: host={}, flatpak={}",
+                        self.detection.host_gsr, self.detection.flatpak_gsr
+                    ))
+                    .color(theme::text_muted())
+                    .size(12.0),
+                );
+            });
+
+            ui.add_space(12.0);
+
+            theme::section_frame().show(ui, |ui| {
+                ui.heading("Audio");
+                ui.add_space(8.0);
+
+                if ui
+                    .checkbox(
+                        &mut self.config.capture_system_audio,
+                        "Capture system audio",
+                    )
+                    .on_hover_text(
+                        "Records desktop/game audio via GPU Screen Recorder (all output or selected apps)",
+                    )
+                    .changed()
+                {
+                    self.apply_capture_settings();
+                }
+                if ui
+                    .checkbox(&mut self.config.capture_microphone, "Capture microphone")
+                    .on_hover_text(
+                        "Records the default mic via GPU Screen Recorder (default_input). \
+                         Merged with system audio into one track when both are enabled.",
+                    )
+                    .changed()
+                {
+                    self.apply_capture_settings();
+                }
+
+                ui.add_enabled_ui(self.config.capture_system_audio, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("System audio source");
+                        if ui
+                            .selectable_value(
+                                &mut self.config.system_audio_mode,
+                                SystemAudioMode::All,
+                                "All system audio",
+                            )
+                            .changed()
+                        {
+                            self.apply_capture_settings();
+                        }
+                        if ui
+                            .selectable_value(
+                                &mut self.config.system_audio_mode,
+                                SystemAudioMode::Apps,
+                                "Selected apps",
+                            )
+                            .changed()
+                        {
+                            self.apply_capture_settings();
                         }
                     });
 
-                    if let Some(error) = &self.detection.audio_apps_error {
-                        ui.label(format!("Could not list apps: {error}"));
-                    } else if self.detection.audio_apps.is_empty() {
-                        ui.label(
-                            "No apps listed yet. Play audio in the game (and Discord), then Refresh. \
-                             Names are PipeWire clients — e.g. Discord often shows as “webrtc voiceengine”.",
-                        );
-                    }
-
-                    // Include selected apps that are not currently listed (still valid for GSR).
-                    let mut listed: Vec<String> = self.detection.audio_apps.clone();
-                    for selected in &self.config.audio_apps {
-                        if !listed.iter().any(|a| a == selected) {
-                            listed.push(selected.clone());
-                        }
-                    }
-                    listed.sort();
-
-                    egui::ScrollArea::vertical()
-                        .max_height(140.0)
-                        .show(ui, |ui| {
-                            for app_name in listed {
-                                let mut checked =
-                                    self.config.audio_apps.iter().any(|a| a == &app_name);
-                                let label = friendly_audio_app_label(&app_name);
-                                if ui.checkbox(&mut checked, label).changed() {
-                                    if checked {
-                                        if !self.config.audio_apps.iter().any(|a| a == &app_name) {
-                                            self.config.audio_apps.push(app_name);
-                                        }
-                                    } else {
-                                        self.config.audio_apps.retain(|a| a != &app_name);
-                                    }
-                                    self.apply_capture_settings();
+                    if self.config.system_audio_mode == SystemAudioMode::Apps {
+                        ui.horizontal(|ui| {
+                            ui.label("Applications");
+                            if ui
+                                .add(theme::secondary_button("Refresh apps"))
+                                .clicked()
+                            {
+                                self.detection = Detection::refresh(self.config.backend);
+                                if let Some(error) = &self.detection.audio_apps_error {
+                                    self.toast(error.clone());
+                                } else {
+                                    self.toast(format!(
+                                        "Found {} app(s) with audio",
+                                        self.detection.audio_apps.len()
+                                    ));
                                 }
                             }
                         });
 
-                    if self.config.audio_apps.is_empty() {
-                        ui.label(
-                            "No apps selected — using all system audio until you pick apps.",
-                        );
-                    } else {
-                        ui.label(format!(
-                            "Capturing {} selected app(s) (+ mic if enabled).",
-                            self.config.audio_apps.len()
-                        ));
-                    }
-                }
-            });
+                        if let Some(error) = &self.detection.audio_apps_error {
+                            ui.colored_label(theme::error(), format!("Could not list apps: {error}"));
+                        } else if self.detection.audio_apps.is_empty() {
+                            ui.label(
+                                egui::RichText::new(
+                                    "No apps listed yet. Play audio in the game (and Discord), then Refresh. \
+                                     Names are PipeWire clients — e.g. Discord often shows as “webrtc voiceengine”.",
+                                )
+                                .color(theme::text_muted())
+                                .size(12.0),
+                            );
+                        }
 
-            ui.horizontal(|ui| {
-                ui.label("Backend");
-                let backend_label = match self.config.backend {
-                    Backend::Auto => "Auto",
-                    Backend::Host => "Host",
-                    Backend::Flatpak => "Flatpak",
-                };
-                egui::ComboBox::from_id_salt("settings_backend")
-                    .selected_text(backend_label)
-                    .show_ui(ui, |ui| {
-                        for (label, value) in [
-                            ("Auto", Backend::Auto),
-                            ("Host", Backend::Host),
-                            ("Flatpak", Backend::Flatpak),
-                        ] {
-                            if ui
-                                .selectable_value(&mut self.config.backend, value, label)
-                                .changed()
-                            {
-                                self.detection = Detection::refresh(self.config.backend);
-                                self.settings_dirty = true;
+                        // Include selected apps that are not currently listed (still valid for GSR).
+                        let mut listed: Vec<String> = self.detection.audio_apps.clone();
+                        for selected in &self.config.audio_apps {
+                            if !listed.iter().any(|a| a == selected) {
+                                listed.push(selected.clone());
                             }
                         }
-                    });
-            });
-            ui.label(format!(
-                "Detected: host={}, flatpak={}",
-                self.detection.host_gsr, self.detection.flatpak_gsr
-            ));
+                        listed.sort();
 
-            ui.add_space(12.0);
-            ui.heading("Output");
-            ui.horizontal(|ui| {
-                ui.label(path_display(&self.config.output_dir));
-                if ui.button("Browse…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                        self.config.output_dir = path;
-                        self.settings_dirty = true;
+                        egui::ScrollArea::vertical()
+                            .max_height(140.0)
+                            .show(ui, |ui| {
+                                for app_name in listed {
+                                    let mut checked =
+                                        self.config.audio_apps.iter().any(|a| a == &app_name);
+                                    let label = friendly_audio_app_label(&app_name);
+                                    if ui.checkbox(&mut checked, label).changed() {
+                                        if checked {
+                                            if !self.config.audio_apps.iter().any(|a| a == &app_name)
+                                            {
+                                                self.config.audio_apps.push(app_name);
+                                            }
+                                        } else {
+                                            self.config.audio_apps.retain(|a| a != &app_name);
+                                        }
+                                        self.apply_capture_settings();
+                                    }
+                                }
+                            });
+
+                        if self.config.audio_apps.is_empty() {
+                            ui.label(
+                                egui::RichText::new(
+                                    "No apps selected — using all system audio until you pick apps.",
+                                )
+                                .color(theme::text_muted())
+                                .size(12.0),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Capturing {} selected app(s) (+ mic if enabled).",
+                                    self.config.audio_apps.len()
+                                ))
+                                .color(theme::text_muted())
+                                .size(12.0),
+                            );
+                        }
                     }
-                }
+                });
             });
 
             ui.add_space(12.0);
-            ui.heading("Hotkey");
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("settings_hotkey")
-                    .selected_text(&self.config.hotkey)
-                    .show_ui(ui, |ui| {
-                        for key in hotkey_choices() {
-                            if ui
-                                .selectable_value(&mut self.config.hotkey, (*key).to_string(), *key)
-                                .changed()
-                            {
-                                self.apply_hotkey();
+
+            theme::section_frame().show(ui, |ui| {
+                ui.heading("Output");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(path_display(&self.config.output_dir));
+                    if ui
+                        .add(theme::secondary_button("Browse…"))
+                        .clicked()
+                    {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.config.output_dir = path;
+                            self.settings_dirty = true;
+                        }
+                    }
+                });
+            });
+
+            ui.add_space(12.0);
+
+            theme::section_frame().show(ui, |ui| {
+                ui.heading("Hotkey");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("settings_hotkey")
+                        .selected_text(&self.config.hotkey)
+                        .show_ui(ui, |ui| {
+                            for key in hotkey_choices() {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.config.hotkey,
+                                        (*key).to_string(),
+                                        *key,
+                                    )
+                                    .changed()
+                                {
+                                    self.apply_hotkey();
+                                    self.persist_config();
+                                }
+                            }
+                        });
+                });
+                ui.label(
+                    egui::RichText::new(&self.hotkeys.status)
+                        .color(theme::text_muted())
+                        .size(12.0),
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(theme::primary_button("Enable global hotkey (portal)"))
+                        .on_hover_text(
+                            "Uses the desktop permission dialog (xdg-desktop-portal). No sudo / input group.",
+                        )
+                        .clicked()
+                    {
+                        match self.hotkeys.enable_portal(&self.config.hotkey) {
+                            Ok(trigger) => {
+                                self.config.portal_hotkey_enabled = true;
                                 self.persist_config();
+                                self.toast(format!("Portal global hotkey enabled ({trigger})"));
                             }
+                            Err(error) => self.toast(format!("Portal hotkey failed: {error}")),
                         }
-                    });
-            });
-            ui.label(&self.hotkeys.status);
-            ui.horizontal(|ui| {
-                if ui
-                    .button("Enable global hotkey (portal)")
-                    .on_hover_text(
-                        "Uses the desktop permission dialog (xdg-desktop-portal). No sudo / input group.",
-                    )
-                    .clicked()
-                {
-                    match self.hotkeys.enable_portal(&self.config.hotkey) {
-                        Ok(trigger) => {
-                            self.config.portal_hotkey_enabled = true;
-                            self.persist_config();
-                            self.toast(format!("Portal global hotkey enabled ({trigger})"));
+                    }
+                    if ui
+                        .add_enabled(
+                            self.hotkeys.is_portal_active(),
+                            theme::secondary_button("Configure global hotkey…"),
+                        )
+                        .on_hover_text("Re-open the portal UI to change the bound shortcut")
+                        .clicked()
+                    {
+                        match self.hotkeys.configure_portal() {
+                            Ok(()) => self.toast("Portal hotkey updated"),
+                            Err(error) => self.toast(format!("Configure failed: {error}")),
                         }
-                        Err(error) => self.toast(format!("Portal hotkey failed: {error}")),
                     }
-                }
-                if ui
-                    .add_enabled(
-                        self.hotkeys.is_portal_active(),
-                        egui::Button::new("Configure global hotkey…"),
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Focused hotkey always works. For in-game keys on Wayland, use Enable global hotkey (portal). \
+                         Advanced: input group / evdev — see status above.",
                     )
-                    .on_hover_text("Re-open the portal UI to change the bound shortcut")
-                    .clicked()
-                {
-                    match self.hotkeys.configure_portal() {
-                        Ok(()) => self.toast("Portal hotkey updated"),
-                        Err(error) => self.toast(format!("Configure failed: {error}")),
-                    }
-                }
+                    .color(theme::text_muted())
+                    .size(12.0),
+                );
             });
-            ui.label(
-                "Focused hotkey always works. For in-game keys on Wayland, use Enable global hotkey (portal). \
-                 Advanced: input group / evdev — see status above.",
-            );
 
             ui.add_space(12.0);
-            ui.heading("Desktop");
-            if ui
-                .checkbox(&mut self.config.autostart, "Start ReplayForge on login")
-                .changed()
-            {
-                match set_autostart(self.config.autostart) {
-                    Ok(()) => self.persist_config(),
-                    Err(error) => self.toast(error),
+
+            theme::section_frame().show(ui, |ui| {
+                ui.heading("Desktop");
+                ui.add_space(8.0);
+                if ui
+                    .checkbox(&mut self.config.autostart, "Start ReplayForge on login")
+                    .changed()
+                {
+                    match set_autostart(self.config.autostart) {
+                        Ok(()) => self.persist_config(),
+                        Err(error) => self.toast(error),
+                    }
                 }
-            }
-            if ui
-                .checkbox(
-                    &mut self.config.auto_start_replay,
-                    "Start replay buffer when ReplayForge opens",
-                )
-                .on_hover_text(
-                    "Automatically begins recording the rolling buffer after launch \
-                     (skipped during first-run setup).",
-                )
-                .changed()
-            {
-                self.persist_config();
-            }
-            if ui
-                .checkbox(
-                    &mut self.config.minimize_to_tray,
-                    "Minimize to tray on close",
-                )
-                .changed()
-            {
-                self.persist_config();
-            }
+                if ui
+                    .checkbox(
+                        &mut self.config.auto_start_replay,
+                        "Start replay buffer when ReplayForge opens",
+                    )
+                    .on_hover_text(
+                        "Automatically begins recording the rolling buffer after launch \
+                         (skipped during first-run setup).",
+                    )
+                    .changed()
+                {
+                    self.persist_config();
+                }
+                if ui
+                    .checkbox(
+                        &mut self.config.minimize_to_tray,
+                        "Minimize to tray on close",
+                    )
+                    .changed()
+                {
+                    self.persist_config();
+                }
+            });
 
             ui.add_space(16.0);
             if self.settings_dirty {
                 if ui
-                    .add_sized(
-                        [220.0, 36.0],
-                        theme::primary_button("Apply & Save"),
-                    )
+                    .add_sized([220.0, 36.0], theme::primary_button("Apply & Save"))
                     .clicked()
                 {
                     self.apply_capture_settings();
                 }
-            } else if ui.button("Save settings").clicked() {
+            } else if ui
+                .add(theme::secondary_button("Save settings"))
+                .clicked()
+            {
                 self.persist_config();
                 self.toast("Settings saved");
             }
@@ -1888,10 +2274,44 @@ impl ReplayForge {
 
         let mut apply = false;
         let mut back = false;
+        let mut play_clicked = false;
+        let mut nudge: Option<f64> = None;
+        let mut space_toggle = false;
 
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !self.trimming {
+        if !self.trimming {
+            ctx.input(|i| {
+                if i.key_pressed(egui::Key::Escape) {
+                    back = true;
+                }
+                if i.key_pressed(egui::Key::Space) {
+                    space_toggle = true;
+                }
+                let step = if i.modifiers.shift { 2.0 } else { 0.5 };
+                if i.key_pressed(egui::Key::ArrowLeft) {
+                    nudge = Some(-step);
+                } else if i.key_pressed(egui::Key::ArrowRight) {
+                    nudge = Some(step);
+                }
+            });
+        }
+
+        if back {
             self.cancel_trim();
             return;
+        }
+
+        if let Some(delta) = nudge {
+            self.stop_trim_playback();
+            state.preview_secs =
+                (state.preview_secs + delta).clamp(state.start_secs, state.end_secs);
+        }
+
+        if space_toggle {
+            self.trim = Some(state.clone());
+            self.toggle_trim_playback();
+            if let Some(updated) = self.trim.clone() {
+                state = updated;
+            }
         }
 
         let clip_name = state
@@ -1915,7 +2335,7 @@ impl ReplayForge {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!self.trimming, egui::Button::new("← Back"))
+                        .add_enabled(!self.trimming, theme::secondary_button("← Back"))
                         .clicked()
                     {
                         back = true;
@@ -1935,9 +2355,30 @@ impl ReplayForge {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                let preview_width = (ui.available_width() - 32.0).max(320.0);
-                let preview_height = preview_width * 9.0 / 16.0;
+                const MAX_PREVIEW_W: f32 = 1400.0;
+                // theme::section_frame() uses Margin::same(20) on each side.
+                const FRAME_PAD: f32 = 40.0;
+                let gap = 12.0_f32;
+                let transport_h = 44.0_f32;
+                let meta_h = 28.0_f32;
+                let timeline_reserve = 88.0_f32;
+                let spacing_reserve = gap * 3.0 + 8.0;
+
+                let avail_w =
+                    (ui.available_width() - 32.0 - FRAME_PAD).clamp(320.0, MAX_PREVIEW_W);
+                let reserved =
+                    transport_h + timeline_reserve + meta_h + spacing_reserve + FRAME_PAD;
+                let avail_h = (ui.available_height() - reserved).max(180.0);
+
+                let height_if_full_width = avail_w * 9.0 / 16.0;
+                let (preview_width, preview_height) = if height_if_full_width <= avail_h {
+                    (avail_w, height_if_full_width)
+                } else {
+                    let width_from_height = (avail_h * 16.0 / 9.0).min(avail_w);
+                    (width_from_height, width_from_height * 9.0 / 16.0)
+                };
                 let preview_size = egui::vec2(preview_width, preview_height);
+                let timeline_height = (preview_width * 0.06).clamp(56.0, 88.0);
 
                 if !self.trim_filmstrip_pending {
                     if self.trim_filmstrip_texture.is_none() {
@@ -1948,83 +2389,144 @@ impl ReplayForge {
                     }
                 }
 
-                let preview_frame = egui::Frame::default()
-                    .fill(theme::surface())
-                    .corner_radius(theme::CORNER_RADIUS);
-
-                preview_frame.show(ui, |ui| {
+                theme::section_frame().show(ui, |ui| {
                     ui.set_width(preview_width);
-                    ui.set_height(preview_height);
                     ui.vertical_centered(|ui| {
-                        if let Some(texture) = &self.trim_preview_texture {
-                            ui.add(egui::Image::new(texture).fit_to_exact_size(preview_size));
-                        } else if self.trim_preview_pending {
-                            ui.label("Loading preview…");
-                        } else if let Some(error) = &self.trim_preview_error {
-                            ui.colored_label(theme::error(), error);
-                        } else {
-                            ui.label("Preview unavailable");
+                        let preview_frame = egui::Frame::default()
+                            .fill(theme::surface_track())
+                            .corner_radius(theme::CORNER_RADIUS);
+
+                        preview_frame.show(ui, |ui| {
+                            ui.set_width(preview_width);
+                            ui.set_height(preview_height);
+                            ui.centered_and_justified(|ui| {
+                                if let Some(texture) = &self.trim_preview_texture {
+                                    ui.add(
+                                        egui::Image::new(texture).fit_to_exact_size(preview_size),
+                                    );
+                                } else if self.trim_preview_pending {
+                                    ui.label(
+                                        egui::RichText::new("Loading preview…")
+                                            .color(theme::text_muted()),
+                                    );
+                                } else if let Some(error) = &self.trim_preview_error {
+                                    ui.colored_label(theme::error(), error);
+                                } else {
+                                    ui.label(
+                                        egui::RichText::new("Preview unavailable")
+                                            .color(theme::text_muted()),
+                                    );
+                                }
+                            });
+                        });
+
+                        ui.add_space(gap);
+
+                        ui.horizontal(|ui| {
+                            ui.set_width(preview_width);
+                            if Self::trim_transport_button(ui, playing, !self.trimming) {
+                                play_clicked = true;
+                            }
+                            ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new(&preview_label).size(18.0).strong(),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(" / {total_label}"))
+                                    .size(18.0)
+                                    .color(theme::text_muted()),
+                            );
+
+                            ui.add_space(16.0);
+
+                            let mute_label = if self.trim_muted { "Unmute" } else { "Mute" };
+                            if ui
+                                .add(theme::secondary_button(mute_label))
+                                .on_hover_text("Toggle preview audio")
+                                .clicked()
+                            {
+                                self.trim_muted = !self.trim_muted;
+                                self.apply_trim_volume();
+                            }
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new("Vol")
+                                    .color(theme::text_muted())
+                                    .size(12.0),
+                            );
+                            let vol_slider = ui.add(
+                                egui::Slider::new(&mut self.trim_volume, 0.0..=1.0)
+                                    .show_value(false),
+                            );
+                            if vol_slider.changed() {
+                                if self.trim_volume > 0.0 {
+                                    self.trim_muted = false;
+                                }
+                                self.apply_trim_volume();
+                            }
+                        });
+
+                        if self.trim_audio_error.is_some() {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new("Audio off — video-only preview")
+                                    .color(theme::text_muted())
+                                    .size(12.0),
+                            );
+                        } else if self.trim_muted {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new("Muted")
+                                    .color(theme::text_muted())
+                                    .size(12.0),
+                            );
                         }
+
+                        ui.add_space(8.0);
+
+                        let filmstrip = self.trim_filmstrip_texture.clone();
+                        let filmstrip_loading = self.trim_filmstrip_pending;
+                        let waveform = self.trim_waveform.clone();
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(preview_width, timeline_height),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                let interacted = Self::trim_timeline_ui(
+                                    ui,
+                                    state.duration_secs,
+                                    &mut state.start_secs,
+                                    &mut state.end_secs,
+                                    &mut state.preview_secs,
+                                    &mut self.trim_drag_handle,
+                                    filmstrip.as_ref(),
+                                    filmstrip_loading,
+                                    waveform.as_deref(),
+                                    preview_width,
+                                    timeline_height,
+                                );
+                                if interacted {
+                                    self.stop_trim_playback();
+                                }
+                            },
+                        );
+
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Keeping {kept_label} of {total_label}  ·  Start {start_label}  ·  End {end_label}"
+                            ))
+                            .color(theme::text_muted_light()),
+                        );
                     });
                 });
-
-                ui.add_space(12.0);
-
-                ui.horizontal(|ui| {
-                    ui.set_width(preview_width);
-                    if Self::trim_transport_button(ui, playing, !self.trimming) {
-                        self.toggle_trim_playback();
-                    }
-                    ui.add_space(12.0);
-                    ui.label(
-                        egui::RichText::new(&preview_label)
-                            .size(18.0)
-                            .strong(),
-                    );
-                    ui.label(
-                        egui::RichText::new(format!(" / {total_label}"))
-                            .size(18.0)
-                            .color(theme::text_muted()),
-                    );
-                });
-
-                ui.add_space(8.0);
-
-                let filmstrip = self.trim_filmstrip_texture.clone();
-                let filmstrip_loading = self.trim_filmstrip_pending;
-                ui.allocate_ui_with_layout(
-                    egui::vec2(preview_width, 64.0),
-                    egui::Layout::top_down(egui::Align::Center),
-                    |ui| {
-                        let interacted = Self::trim_timeline_ui(
-                            ui,
-                            state.duration_secs,
-                            &mut state.start_secs,
-                            &mut state.end_secs,
-                            &mut state.preview_secs,
-                            &mut self.trim_drag_handle,
-                            filmstrip.as_ref(),
-                            filmstrip_loading,
-                            preview_width,
-                            64.0,
-                        );
-                        if interacted {
-                            self.stop_trim_playback();
-                        }
-                    },
-                );
-
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Keeping {kept_label} of {total_label}  ·  Start {start_label}  ·  End {end_label}"
-                    ))
-                    .color(theme::text_muted_light()),
-                );
             });
         });
 
         self.trim = Some(state);
+
+        if play_clicked {
+            self.toggle_trim_playback();
+        }
 
         if back {
             self.cancel_trim();

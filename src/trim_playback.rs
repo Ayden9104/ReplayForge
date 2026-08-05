@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const VIDEO_WIDTH: usize = 854;
 const VIDEO_HEIGHT: usize = 480;
@@ -26,13 +26,16 @@ pub struct TrimFrame {
 
 pub struct TrimPlayback {
     handle: TrimPlaybackHandle,
-    pub frame_rx: Receiver<TrimFrame>,
+    frame_rx: Receiver<TrimFrame>,
+    pending_frame: Option<TrimFrame>,
     pub start_secs: f64,
     pub selection_secs: f64,
     pub audio_enabled: bool,
+    pub audio_error: Option<String>,
 }
 
 impl TrimPlayback {
+    /// Play `[start_secs, end_secs)` from `path` (caller clamps playhead into the keep range).
     pub fn start(path: &Path, start_secs: f64, end_secs: f64) -> Result<Self, String> {
         if end_secs <= start_secs {
             return Err("Invalid play range".into());
@@ -46,6 +49,7 @@ impl TrimPlayback {
         let video_child: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
         let audio_child: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(None));
 
+        // Small buffer: producer paces to realtime; consumer syncs by clock.
         let (frame_tx, frame_rx) = mpsc::sync_channel(2);
 
         spawn_video_thread(
@@ -58,7 +62,7 @@ impl TrimPlayback {
             frame_tx,
         )?;
 
-        let (audio_stream, sink, audio_enabled) = setup_audio_playback(
+        let (audio_stream, sink, audio_enabled, audio_error) = setup_audio_playback(
             Arc::clone(&stop),
             Arc::clone(&audio_child),
             path_str.to_string(),
@@ -77,9 +81,11 @@ impl TrimPlayback {
         Ok(Self {
             handle,
             frame_rx,
+            pending_frame: None,
             start_secs,
             selection_secs,
             audio_enabled,
+            audio_error,
         })
     }
 
@@ -89,6 +95,37 @@ impl TrimPlayback {
 
     pub fn is_active(&self) -> bool {
         !self.handle.stop.load(Ordering::Relaxed)
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        if let Some(sink) = &self.handle.sink {
+            sink.set_volume(volume.clamp(0.0, 1.0));
+        }
+    }
+
+    /// Return the newest frame due at `target_secs` (media timeline). Hold early frames.
+    pub fn take_frame_for_time(&mut self, target_secs: f64) -> Option<TrimFrame> {
+        let mut latest: Option<TrimFrame> = None;
+
+        if let Some(frame) = self.pending_frame.take() {
+            if frame.time_secs <= target_secs + 0.002 {
+                latest = Some(frame);
+            } else {
+                self.pending_frame = Some(frame);
+                return None;
+            }
+        }
+
+        while let Ok(frame) = self.frame_rx.try_recv() {
+            if frame.time_secs <= target_secs + 0.002 {
+                latest = Some(frame);
+            } else {
+                self.pending_frame = Some(frame);
+                break;
+            }
+        }
+
+        latest
     }
 }
 
@@ -112,6 +149,17 @@ impl TrimPlaybackHandle {
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
+    }
+}
+
+fn sleep_until(deadline: Instant, stop: &AtomicBool) {
+    while !stop.load(Ordering::Relaxed) {
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        thread::sleep(remaining.min(Duration::from_millis(5)));
     }
 }
 
@@ -164,6 +212,8 @@ fn spawn_video_thread(
         let mut rgb = vec![0u8; FRAME_BYTES];
         let mut rgba = Vec::with_capacity(FRAME_BYTES / 3 * 4);
         let mut frame_idx = 0u64;
+        // Pace emission to 1× wall clock so the UI can't drain frames as a timelapse.
+        let origin = Instant::now();
 
         while !stop.load(Ordering::Relaxed) {
             if !read_exact(&mut stdout, &mut rgb, &stop) {
@@ -171,6 +221,13 @@ fn spawn_video_thread(
             }
             rgb24_to_rgba(&rgb, &mut rgba);
             let time_secs = start_secs + frame_idx as f64 / PLAYBACK_FPS;
+
+            let due = origin + Duration::from_secs_f64(frame_idx as f64 / PLAYBACK_FPS);
+            sleep_until(due, &stop);
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+
             let frame = TrimFrame {
                 rgba,
                 width: VIDEO_WIDTH as u32,
@@ -194,7 +251,7 @@ fn setup_audio_playback(
     path: String,
     start: String,
     duration: String,
-) -> (Option<OutputStream>, Option<Sink>, bool) {
+) -> (Option<OutputStream>, Option<Sink>, bool, Option<String>) {
     let (pcm_tx, pcm_rx) = mpsc::sync_channel::<Vec<f32>>(64);
 
     let mut child = match host_command(
@@ -224,14 +281,26 @@ fn setup_audio_playback(
     .spawn()
     {
         Ok(child) => child,
-        Err(_) => return (None, None, false),
+        Err(e) => {
+            return (
+                None,
+                None,
+                false,
+                Some(format!("ffmpeg audio spawn failed: {e}")),
+            );
+        }
     };
 
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
             let _ = child.kill();
-            return (None, None, false);
+            return (
+                None,
+                None,
+                false,
+                Some("ffmpeg audio stdout unavailable".into()),
+            );
         }
     };
     audio_child.lock().unwrap().replace(child);
@@ -269,11 +338,33 @@ fn setup_audio_playback(
                     index: 0,
                 };
                 sink.append(source);
-                (Some(stream), Some(sink), true)
+                (Some(stream), Some(sink), true, None)
             }
-            Err(_) => (None, None, false),
+            Err(e) => {
+                drop(pcm_rx);
+                if let Some(mut child) = audio_child.lock().unwrap().take() {
+                    let _ = child.kill();
+                }
+                (
+                    None,
+                    None,
+                    false,
+                    Some(format!("Audio sink unavailable: {e}")),
+                )
+            }
         },
-        Err(_) => (None, None, false),
+        Err(e) => {
+            drop(pcm_rx);
+            if let Some(mut child) = audio_child.lock().unwrap().take() {
+                let _ = child.kill();
+            }
+            (
+                None,
+                None,
+                false,
+                Some(format!("No audio output device: {e}")),
+            )
+        }
     }
 }
 

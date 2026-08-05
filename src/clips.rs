@@ -121,6 +121,110 @@ pub fn extract_filmstrip_jpeg(
     Ok(jpeg)
 }
 
+/// Peak count for waveform overlay (scales with timeline width).
+pub fn waveform_peak_count(timeline_width: f32) -> usize {
+    ((timeline_width / 3.0).floor() as usize).clamp(128, 512)
+}
+
+/// Decode mono PCM and downsample to `peak_count` RMS peaks in `0.0..=1.0`.
+pub fn extract_waveform_peaks(
+    path: &Path,
+    duration_secs: f64,
+    peak_count: usize,
+) -> Result<Vec<f32>, String> {
+    let peak_count = peak_count.max(1);
+    let input = path.to_string_lossy();
+    // Cap decode length to avoid huge buffers on very long clips.
+    let decode_secs = duration_secs.clamp(0.1, 600.0);
+    let duration = format!("{decode_secs:.3}");
+
+    let mut child = host_command(
+        "ffmpeg",
+        &[
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-i",
+            &input,
+            "-t",
+            &duration,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "8000",
+            "-f",
+            "f32le",
+            "-",
+        ],
+    )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .map_err(|e| format!("Failed to run ffmpeg for waveform: {e}"))?;
+
+    let mut pcm_bytes = Vec::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        stdout
+            .read_to_end(&mut pcm_bytes)
+            .map_err(|e| format!("Failed to read waveform PCM: {e}"))?;
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("ffmpeg waveform wait failed: {e}"))?;
+
+    if !status.success() {
+        return Err("Waveform extraction failed. Is ffmpeg installed?".into());
+    }
+    if pcm_bytes.len() < 4 {
+        return Ok(vec![0.0; peak_count]);
+    }
+
+    let samples: Vec<f32> = pcm_bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect();
+
+    if samples.is_empty() {
+        return Ok(vec![0.0; peak_count]);
+    }
+
+    let bucket = (samples.len() as f64 / peak_count as f64).max(1.0);
+    let mut peaks = Vec::with_capacity(peak_count);
+    let mut max_peak = 0.0_f32;
+
+    for i in 0..peak_count {
+        let start = (i as f64 * bucket).floor() as usize;
+        let end = (((i + 1) as f64 * bucket).floor() as usize).min(samples.len());
+        if start >= end {
+            peaks.push(0.0);
+            continue;
+        }
+        let mut sum_sq = 0.0_f64;
+        let mut n = 0usize;
+        for &s in &samples[start..end] {
+            sum_sq += (s as f64) * (s as f64);
+            n += 1;
+        }
+        let rms = if n > 0 {
+            (sum_sq / n as f64).sqrt() as f32
+        } else {
+            0.0
+        };
+        max_peak = max_peak.max(rms);
+        peaks.push(rms);
+    }
+
+    if max_peak > 1e-6 {
+        for p in &mut peaks {
+            *p = (*p / max_peak).clamp(0.0, 1.0);
+        }
+    }
+
+    Ok(peaks)
+}
+
 /// Generate a sidecar `.png` thumbnail for a clip (first frame).
 pub fn generate_clip_thumbnail(path: &Path) -> Result<(), String> {
     let thumbnail = path.with_extension("png");
