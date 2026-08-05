@@ -5,6 +5,7 @@ mod detect;
 mod host;
 mod hotkeys;
 mod recorder;
+mod sfx;
 mod theme;
 mod tray;
 mod trim_playback;

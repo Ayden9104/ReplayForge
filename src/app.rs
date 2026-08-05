@@ -11,9 +11,10 @@ use crate::detect::{
     Detection, clip_duration_secs, format_bytes, format_duration, friendly_audio_app_label,
     probe_clip_meta,
 };
-use crate::host::{notify_desktop, open_path};
+use crate::host::{notify_desktop, notify_desktop_with_urgency, open_path};
 use crate::hotkeys::HotkeyService;
 use crate::recorder::Recorder;
+use crate::sfx;
 use crate::theme;
 use crate::tray::{TrayCommand, TrayHandle};
 use crate::trim_playback::TrimPlayback;
@@ -279,6 +280,7 @@ impl ReplayForge {
 
         self.saving = true;
         self.toast("Saving clip…");
+        notify_desktop_with_urgency("Saving clip…", "Capturing your replay buffer", "low", 2500);
 
         let recorder = Arc::clone(&self.recorder);
         let output_dir = self.config.output_dir.clone();
@@ -314,6 +316,7 @@ impl ReplayForge {
                             "Clip ready",
                             &format!("{name}\nOpen ReplayForge → Clips to review or trim."),
                         );
+                        sfx::play_clip_saved();
                         self.clips_dirty = true;
                         self.clear_clip_caches();
                         self.clip_focus = Some(path.clone());
@@ -1343,14 +1346,19 @@ impl ReplayForge {
                 );
             }
 
-            if let Some(reason) = &self.tray_unavailable_reason {
+            if self.tray_unavailable_reason.is_some() {
                 ui.add_space(8.0);
                 ui.label(
-                    egui::RichText::new(format!(
-                        "System tray unavailable ({reason}). Closing the window hides ReplayForge; reopen from the app menu while the buffer keeps running."
-                    ))
+                    egui::RichText::new(
+                        "System tray unavailable. Closing hides ReplayForge; reopen from the app menu — the buffer keeps running.",
+                    )
                     .color(theme::text_muted())
                     .size(12.0),
+                )
+                .on_hover_text(
+                    self.tray_unavailable_reason
+                        .as_deref()
+                        .unwrap_or("Tray unavailable"),
                 );
             }
 
