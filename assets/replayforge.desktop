@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ReplayForge
+GenericName=Instant Replay
+Comment=Bare-bones Medal-like instant replay for Linux
+Exec=replayforge
+Icon=replayforge
+Terminal=false
+Categories=AudioVideo;Recorder;Utility;
+Keywords=replay;clip;medal;recording;gsr;
+StartupNotify=true

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="ReplayForge">
+  <rect width="128" height="128" rx="28" fill="#12212b"/>
+  <circle cx="64" cy="64" r="36" fill="none" stroke="#2eccb0" stroke-width="10"/>
+  <polygon points="56,44 88,64 56,84" fill="#2eccb0"/>
+</svg>

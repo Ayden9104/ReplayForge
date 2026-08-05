@@ -1,0 +1,34 @@
+# Starter Flatpak manifest for ReplayForge.
+# Note: capturing the screen via gpu-screen-recorder usually requires host access.
+# Prefer the user-local install script for now; refine this for a sandboxed release later.
+app-id: com.replayforge.ReplayForge
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: replayforge
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --device=dri
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --filesystem=xdg-videos:create
+  - --filesystem=xdg-config/replayforge:create
+modules:
+  - name: replayforge
+    buildsystem: simple
+    build-commands:
+      - source /usr/lib/sdk/rust-stable/enable.sh && cargo --offline build --release --locked ||
+        (source /usr/lib/sdk/rust-stable/enable.sh && cargo build --release)
+      - install -Dm755 target/release/replayforge /app/bin/replayforge
+      - install -Dm644 assets/replayforge.desktop /app/share/applications/com.replayforge.ReplayForge.desktop
+      - install -Dm644 assets/replayforge.svg /app/share/icons/hicolor/scalable/apps/com.replayforge.ReplayForge.svg
+      - desktop-file-edit --set-key=Exec --set-value=replayforge /app/share/applications/com.replayforge.ReplayForge.desktop
+      - desktop-file-edit --set-key=Icon --set-value=com.replayforge.ReplayForge /app/share/applications/com.replayforge.ReplayForge.desktop
+    sources:
+      - type: dir
+        path: ../..
