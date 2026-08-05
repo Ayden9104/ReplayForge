@@ -71,6 +71,15 @@ pub fn card_frame() -> Frame {
         .stroke(Stroke::new(1.0_f32, stroke_subtle()))
 }
 
+/// Emphasized card for the most recently saved clip.
+pub fn card_frame_focused() -> Frame {
+    Frame::default()
+        .fill(surface())
+        .corner_radius(CORNER_RADIUS)
+        .inner_margin(Margin::same(14))
+        .stroke(Stroke::new(2.0_f32, accent()))
+}
+
 pub fn primary_button(text: &str) -> Button<'static> {
     Button::new(text).fill(accent())
 }

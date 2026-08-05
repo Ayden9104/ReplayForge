@@ -115,6 +115,10 @@ pub struct ReplayForge {
     clip_thumb_tx: Sender<(PathBuf, Result<(u32, u32, Vec<u8>), String>)>,
     clip_thumb_rx: Receiver<(PathBuf, Result<(u32, u32, Vec<u8>), String>)>,
     clip_thumb_inflight: HashSet<PathBuf>,
+    /// Newest saved clip to highlight / scroll to in the library.
+    clip_focus: Option<PathBuf>,
+    /// Set when StatusNotifier tray creation fails (Bazzite/session without SNI).
+    tray_unavailable_reason: Option<String>,
     clip_sort: ClipSort,
     clip_filter: String,
 }
@@ -131,11 +135,11 @@ impl ReplayForge {
         let show_first_run = config.is_first_run();
         let hotkeys = HotkeyService::start(&config.hotkey, config.portal_hotkey_enabled);
 
-        let tray = match crate::tray::create_tray() {
-            Ok(tray) => Some(tray),
+        let (tray, tray_unavailable_reason) = match crate::tray::create_tray() {
+            Ok(tray) => (Some(tray), None),
             Err(error) => {
                 eprintln!("Tray unavailable: {error}");
-                None
+                (None, Some(error))
             }
         };
 
@@ -195,6 +199,8 @@ impl ReplayForge {
             clip_thumb_tx,
             clip_thumb_rx,
             clip_thumb_inflight: HashSet::new(),
+            clip_focus: None,
+            tray_unavailable_reason,
             clip_sort: ClipSort::Newest,
             clip_filter: String::new(),
         };
@@ -301,12 +307,21 @@ impl ReplayForge {
                             .and_then(|n| n.to_str())
                             .unwrap_or("clip")
                             .to_string();
-                        let msg = format!("Saved {name}");
-                        self.toast(msg.clone());
-                        notify_desktop("Clip saved", &format!("{name}\n{}", path.display()));
+                        self.toast(format!(
+                            "Clip ready — {name}. Review it in Clips or press Trim."
+                        ));
+                        notify_desktop(
+                            "Clip ready",
+                            &format!("{name}\nOpen ReplayForge → Clips to review or trim."),
+                        );
                         self.clips_dirty = true;
                         self.clear_clip_caches();
-                        self.page = Page::Clips;
+                        self.clip_focus = Some(path.clone());
+                        if self.config.open_trim_after_save {
+                            self.open_trim(path);
+                        } else {
+                            self.page = Page::Clips;
+                        }
                     }
                     Err(error) => self.toast(error),
                 }
@@ -1102,9 +1117,9 @@ impl eframe::App for ReplayForge {
             return;
         }
 
-        // Minimize to tray on close
+        // Minimize on close (tray when available; otherwise hide window and keep buffer).
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.config.minimize_to_tray && self.tray.is_some() && !self.quit_requested {
+            if self.config.minimize_to_tray && !self.quit_requested {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             } else {
@@ -1318,6 +1333,26 @@ impl ReplayForge {
                     .circle_filled(dot_rect.center(), 5.0, status_color);
                 ui.label(egui::RichText::new(status_text).size(16.0).strong());
             });
+
+            if replay_running {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new("Buffer live — press your save hotkey anytime")
+                        .color(theme::status_running())
+                        .size(12.0),
+                );
+            }
+
+            if let Some(reason) = &self.tray_unavailable_reason {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "System tray unavailable ({reason}). Closing the window hides ReplayForge; reopen from the app menu while the buffer keeps running."
+                    ))
+                    .color(theme::text_muted())
+                    .size(12.0),
+                );
+            }
 
             ui.add_space(12.0);
             ui.label(
@@ -1613,7 +1648,14 @@ impl ReplayForge {
                                     .map(|m| format_bytes(m.len()))
                                     .unwrap_or_else(|_| "?".into());
 
-                                theme::card_frame().show(ui, |ui| {
+                                let focused = self.clip_focus.as_ref() == Some(clip_path);
+                                let card = if focused {
+                                    theme::card_frame_focused()
+                                } else {
+                                    theme::card_frame()
+                                };
+
+                                let card_response = card.show(ui, |ui| {
                                     ui.set_min_width(card_inner);
                                     ui.set_max_width(card_inner);
                                     ui.vertical(|ui| {
@@ -1712,6 +1754,14 @@ impl ReplayForge {
                                                 });
                                             }
                                         } else {
+                                            if focused {
+                                                ui.label(
+                                                    egui::RichText::new("Just saved")
+                                                        .color(theme::accent_bright())
+                                                        .size(11.0)
+                                                        .strong(),
+                                                );
+                                            }
                                             ui.label(
                                                 egui::RichText::new(&clip_name).strong().size(14.0),
                                             );
@@ -1731,7 +1781,22 @@ impl ReplayForge {
                                             );
                                             ui.add_space(4.0);
                                             ui.horizontal_wrapped(|ui| {
-                                                if ui.add(theme::secondary_button("Open")).clicked()
+                                                if focused {
+                                                    if ui
+                                                        .add(theme::primary_button("Trim"))
+                                                        .clicked()
+                                                    {
+                                                        start_trim_req = Some(clip_path.clone());
+                                                    }
+                                                    if ui
+                                                        .add(theme::secondary_button("Open"))
+                                                        .clicked()
+                                                    {
+                                                        open_path_req = Some(clip_path.clone());
+                                                    }
+                                                } else if ui
+                                                    .add(theme::secondary_button("Open"))
+                                                    .clicked()
                                                 {
                                                     open_path_req = Some(clip_path.clone());
                                                 }
@@ -1748,7 +1813,11 @@ impl ReplayForge {
                                                 {
                                                     start_rename = Some(clip_path.clone());
                                                 }
-                                                if ui.add(theme::primary_button("Trim")).clicked() {
+                                                if !focused
+                                                    && ui
+                                                        .add(theme::primary_button("Trim"))
+                                                        .clicked()
+                                                {
                                                     start_trim_req = Some(clip_path.clone());
                                                 }
                                                 if ui.button("Delete").clicked() {
@@ -1761,6 +1830,12 @@ impl ReplayForge {
                                         }
                                     });
                                 });
+
+                                if focused {
+                                    card_response
+                                        .response
+                                        .scroll_to_me(Some(egui::Align::Center));
+                                }
 
                                 if (index + 1) % columns == 0 {
                                     ui.end_row();
@@ -1810,6 +1885,9 @@ impl ReplayForge {
                                 if old_thumb.exists() {
                                     let _ = fs::rename(&old_thumb, &new_thumb);
                                 }
+                                if self.clip_focus.as_ref() == Some(&old_path) {
+                                    self.clip_focus = Some(new_path);
+                                }
                                 self.clear_clip_caches();
                                 self.toast("Clip renamed");
                             }
@@ -1825,6 +1903,9 @@ impl ReplayForge {
                     } else {
                         if thumbnail_path.exists() {
                             let _ = fs::remove_file(&thumbnail_path);
+                        }
+                        if self.clip_focus.as_ref() == Some(&clip_path) {
+                            self.clip_focus = None;
                         }
                         self.clear_clip_caches();
                         self.toast("Clip deleted");
@@ -2242,6 +2323,23 @@ impl ReplayForge {
                     .checkbox(
                         &mut self.config.minimize_to_tray,
                         "Minimize to tray on close",
+                    )
+                    .on_hover_text(
+                        "Hides the window instead of quitting. Works even if the system tray \
+                         icon is unavailable — reopen from the app menu.",
+                    )
+                    .changed()
+                {
+                    self.persist_config();
+                }
+                if ui
+                    .checkbox(
+                        &mut self.config.open_trim_after_save,
+                        "Open trim editor after saving a clip",
+                    )
+                    .on_hover_text(
+                        "When enabled, save jumps straight into Trim for the new clip \
+                         instead of highlighting it in Clips.",
                     )
                     .changed()
                 {
