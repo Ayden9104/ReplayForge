@@ -429,6 +429,10 @@ fn build_gsr_args(config: &Config, fps: &str, buffer: &str, output: &str) -> Vec
         "-o".into(),
         output.to_string(),
     ];
+    if config.resolution != "native" && !config.resolution.is_empty() {
+        args.push("-s".into());
+        args.push(config.resolution.clone());
+    }
     let mut audio_sources = Vec::new();
     if config.capture_system_audio {
         let use_apps = config.system_audio_mode == crate::config::SystemAudioMode::Apps

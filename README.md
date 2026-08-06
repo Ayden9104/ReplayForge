@@ -11,12 +11,12 @@ Start a rolling replay buffer with [GPU Screen Recorder](https://git.dec05eba.co
 - Quality presets (Balanced / High / Ultra CBR)
 - Global save hotkey (portal on Wayland; X11 / evdev fallbacks)
 - Clips library: thumbnails, open, copy path, rename, full-screen trim with filmstrip timeline, draggable playhead, in-app preview playback, delete, sort/filter
-- Desktop notification when a clip saves
-- Settings: display, FPS, buffer, codec, quality, audio, output, backend
-- System tray (show/hide, save, quit)
+- Clip save sound + desktop notification (configurable)
+- Settings: display, resolution, FPS, buffer, codec, quality, audio, output, sound, backend
+- System tray (show/hide, save, quit) with sidebar Quit fallback
 - Autostart + minimize-to-tray + optional auto-start replay on launch
 - First-run setup (display, folder, audio, portal hotkey)
-- Config at `~/.config/replayforge/config.toml`
+- Config at `~/.config/ReplayForge/config.toml`
 - Dark UI theme (consistent trim and panel styling)
 
 ## Requirements
@@ -25,7 +25,7 @@ Start a rolling replay buffer with [GPU Screen Recorder](https://git.dec05eba.co
 - [gpu-screen-recorder](https://git.dec05eba.com/gpu-screen-recorder/) **or** Flatpak `com.dec05eba.gpu_screen_recorder`
 - `ffmpeg` / `ffprobe` (thumbnails, trim, trim preview video decode)
 - Rust toolchain to build from source
-- `alsa-lib-devel` when building from source (trim preview audio via rodio)
+- `alsa-lib-devel` when building from source (trim preview audio / SFX via rodio)
 
 ### Optional / environment notes
 
@@ -33,45 +33,66 @@ Start a rolling replay buffer with [GPU Screen Recorder](https://git.dec05eba.co
 - Global Wayland hotkeys work best when ReplayForge runs on the **host** (portal + session bus)
 - Folder picker uses the XDG desktop portal (`rfd`)
 
-## Build
-
-```bash
-cargo build --release
-```
-
-Fedora/Bazzite builders need `alsa-lib-devel` for trim preview audio (rodio/cpal; works with PipeWire via pipewire-alsa).
-
-Binary: `target/release/replayforge`
-
-## Run
-
-```bash
-cargo run --release
-```
-
-On first launch, pick your display and clips folder, then start replay from **Home**.
-
-Default save hotkey: **F8**
-
 ## Install (user-local)
+
+Primary install path:
 
 ```bash
 ./scripts/install.sh
 ```
 
-This installs:
+This builds a release binary (`cargo build --release --locked`) and installs:
 
 - `~/.local/bin/replayforge`
 - `~/.local/share/applications/replayforge.desktop`
 - `~/.local/share/icons/hicolor/scalable/apps/replayforge.svg`
 
+Custom prefix:
+
+```bash
+PREFIX=/opt/replayforge ./scripts/install.sh
+```
+
+Uninstall (keeps config):
+
+```bash
+./scripts/install.sh --uninstall
+```
+
 Then log out/in (or refresh your app menu) and launch **ReplayForge**.
 
-Ensure `~/.local/bin` is on your `PATH` if the menu entry is missing and `replayforge` is not found in a terminal. On Bazzite/Wayland, run from the **host** session for portal hotkeys and app audio.
+Ensure `~/.local/bin` is on your `PATH` if the menu entry is missing and `replayforge` is not found in a terminal.
+
+### Post-install checklist
+
+1. Finish first-run (display + clips folder).
+2. **Settings → Hotkey → Enable global hotkey (portal)** for in-game F8 on Wayland.
+3. On Bazzite/Wayland, run from the **host** session for portal hotkeys and app audio.
+4. Confirm `gpu-screen-recorder` (or its Flatpak) and `ffmpeg`/`ffprobe` are available.
+
+### Tray troubleshooting
+
+The tray needs a StatusNotifier / AppIndicator host. Some sessions (including Bazzite/KDE) may fail to create the icon; ReplayForge retries once after a short delay. If the tray stays unavailable:
+
+- Closing the window still **hides** the app when minimize-to-tray is enabled — reopen from the app menu.
+- Use **Quit** in the sidebar to stop the buffer and exit.
+
+## Build / run from source
+
+```bash
+cargo build --release
+cargo run --release
+```
+
+Fedora/Bazzite builders need `alsa-lib-devel` for rodio/cpal (works with PipeWire via pipewire-alsa).
+
+Binary: `target/release/replayforge`
+
+On first launch, pick your display and clips folder, then start replay from **Home**. Default save hotkey: **F8**.
 
 ## Flatpak (optional packaging)
 
-A starter manifest lives at [`packaging/flatpak/com.replayforge.ReplayForge.yml`](packaging/flatpak/com.replayforge.ReplayForge.yml). Building a fully sandboxed Flatpak that can drive host GSR needs extra permissions and is best treated as a follow-up release step.
+A starter manifest lives at [`packaging/flatpak/com.replayforge.ReplayForge.yml`](packaging/flatpak/com.replayforge.ReplayForge.yml). It is **not** an end-user supported install path yet — a fully sandboxed Flatpak that can drive host GSR needs extra permissions. Prefer `./scripts/install.sh`.
 
 ## Config
 
@@ -81,6 +102,7 @@ Example `config.toml`:
 output_dir = "/home/you/Videos/ReplayForge"
 display = "DP-1"
 fps = 60
+resolution = "native"       # native | 1920x1080 | 1280x720 | 2560x1440
 buffer_seconds = 60
 codec = "h264"
 quality = "high"            # balanced | high | ultra (CBR kbps)
@@ -95,10 +117,15 @@ autostart = false
 auto_start_replay = false
 minimize_to_tray = true
 open_trim_after_save = false
+# clip_sound_path = "/path/to/custom.wav"  # omit for bundled sound
+sfx_volume = 1.0
+clip_ready_notify_critical = true
 first_run_complete = true
 ```
 
 Audio is one GSR `-a` track. Default is `default_output|default_input`. In **Settings → Capture**, choose **Selected apps** to record only those apps (PipeWire). App list names are PipeWire clients (Discord often appears as `webrtc voiceengine`).
+
+Sound and notification options live under **Settings → Sound & notifications**.
 
 ## Hotkeys & Wayland
 

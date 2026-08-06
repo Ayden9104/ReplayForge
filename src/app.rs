@@ -5,7 +5,7 @@ use crate::clips::{
 };
 use crate::config::{
     Backend, Config, SystemAudioMode, codec_choices, hotkey_choices, path_display, quality_choices,
-    set_autostart,
+    resolution_choices, set_autostart,
 };
 use crate::detect::{
     Detection, clip_duration_secs, format_bytes, format_duration, friendly_audio_app_label,
@@ -120,6 +120,8 @@ pub struct ReplayForge {
     clip_focus: Option<PathBuf>,
     /// Set when StatusNotifier tray creation fails (Bazzite/session without SNI).
     tray_unavailable_reason: Option<String>,
+    /// When set, retry tray creation once at this instant (SNI may start late).
+    tray_retry_at: Option<Instant>,
     clip_sort: ClipSort,
     clip_filter: String,
 }
@@ -136,11 +138,15 @@ impl ReplayForge {
         let show_first_run = config.is_first_run();
         let hotkeys = HotkeyService::start(&config.hotkey, config.portal_hotkey_enabled);
 
-        let (tray, tray_unavailable_reason) = match crate::tray::create_tray() {
-            Ok(tray) => (Some(tray), None),
+        let (tray, tray_unavailable_reason, tray_retry_at) = match crate::tray::create_tray() {
+            Ok(tray) => (Some(tray), None, None),
             Err(error) => {
                 eprintln!("Tray unavailable: {error}");
-                (None, Some(error))
+                (
+                    None,
+                    Some(error),
+                    Some(Instant::now() + Duration::from_secs(2)),
+                )
             }
         };
 
@@ -202,6 +208,7 @@ impl ReplayForge {
             clip_thumb_inflight: HashSet::new(),
             clip_focus: None,
             tray_unavailable_reason,
+            tray_retry_at,
             clip_sort: ClipSort::Newest,
             clip_filter: String::new(),
         };
@@ -280,7 +287,10 @@ impl ReplayForge {
 
         self.saving = true;
         self.toast("Saving clip…");
-        sfx::play_clip_saved();
+        sfx::play_clip_saved(
+            self.config.clip_sound_path.as_deref(),
+            self.config.sfx_volume,
+        );
         notify_desktop_with_urgency("Saving clip…", "Capturing your replay buffer", "low", 2500);
 
         let recorder = Arc::clone(&self.recorder);
@@ -316,7 +326,11 @@ impl ReplayForge {
                         notify_desktop_with_urgency(
                             "Clip ready",
                             &format!("{name}\nOpen ReplayForge → Clips to review or trim."),
-                            "critical",
+                            if self.config.clip_ready_notify_critical {
+                                "critical"
+                            } else {
+                                "normal"
+                            },
                             5000,
                         );
                         self.clips_dirty = true;
@@ -1068,6 +1082,27 @@ impl ReplayForge {
 impl eframe::App for ReplayForge {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Tray commands
+        if self.tray.is_none() {
+            if let Some(retry_at) = self.tray_retry_at {
+                if Instant::now() >= retry_at {
+                    self.tray_retry_at = None;
+                    match crate::tray::create_tray() {
+                        Ok(tray) => {
+                            eprintln!("Tray available after retry");
+                            self.tray = Some(tray);
+                            self.tray_unavailable_reason = None;
+                        }
+                        Err(error) => {
+                            eprintln!("Tray retry failed: {error}");
+                            self.tray_unavailable_reason = Some(error);
+                        }
+                    }
+                } else {
+                    ctx.request_repaint_after(retry_at.saturating_duration_since(Instant::now()));
+                }
+            }
+        }
+
         let tray_cmds: Vec<TrayCommand> = self
             .tray
             .as_ref()
@@ -1218,6 +1253,17 @@ impl eframe::App for ReplayForge {
                 if theme::nav_item(ui, "Settings", self.page == Page::Settings) {
                     self.page = Page::Settings;
                 }
+
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.add_space(4.0);
+                    if ui
+                        .add(theme::secondary_button("Quit"))
+                        .on_hover_text("Stop replay and exit ReplayForge")
+                        .clicked()
+                    {
+                        self.quit_requested = true;
+                    }
+                });
             });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.page {
@@ -1352,7 +1398,7 @@ impl ReplayForge {
                 ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new(
-                        "System tray unavailable. Closing hides ReplayForge; reopen from the app menu — the buffer keeps running.",
+                        "System tray unavailable. Closing hides ReplayForge; use Quit in the sidebar to exit — the buffer keeps running while hidden.",
                     )
                     .color(theme::text_muted())
                     .size(12.0),
@@ -1367,8 +1413,13 @@ impl ReplayForge {
             ui.add_space(12.0);
             ui.label(
                 egui::RichText::new(format!(
-                    "Display: {} · {} FPS · {}s buffer · {}",
+                    "Display: {} · {} · {} FPS · {}s buffer · {}",
                     self.config.display,
+                    if self.config.resolution == "native" {
+                        "Native"
+                    } else {
+                        self.config.resolution.as_str()
+                    },
                     self.config.fps,
                     self.config.buffer_seconds,
                     self.config.codec
@@ -1975,6 +2026,31 @@ impl ReplayForge {
                 });
 
                 ui.horizontal(|ui| {
+                    ui.label("Resolution");
+                    let selected_label = resolution_choices()
+                        .iter()
+                        .find(|(value, _)| *value == self.config.resolution)
+                        .map(|(_, label)| *label)
+                        .unwrap_or(self.config.resolution.as_str());
+                    egui::ComboBox::from_id_salt("settings_resolution")
+                        .selected_text(selected_label)
+                        .show_ui(ui, |ui| {
+                            for (value, label) in resolution_choices() {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.config.resolution,
+                                        (*value).to_string(),
+                                        *label,
+                                    )
+                                    .changed()
+                                {
+                                    self.settings_dirty = true;
+                                }
+                            }
+                        });
+                });
+
+                ui.horizontal(|ui| {
                     ui.label("Buffer (seconds)");
                     if ui
                         .add(egui::DragValue::new(&mut self.config.buffer_seconds).range(5..=600))
@@ -2336,7 +2412,7 @@ impl ReplayForge {
                     )
                     .on_hover_text(
                         "Hides the window instead of quitting. Works even if the system tray \
-                         icon is unavailable — reopen from the app menu.",
+                         icon is unavailable — reopen from the app menu, or use Quit in the sidebar.",
                     )
                     .changed()
                 {
@@ -2354,6 +2430,82 @@ impl ReplayForge {
                     .changed()
                 {
                     self.persist_config();
+                }
+            });
+
+            ui.add_space(12.0);
+
+            theme::section_frame().show(ui, |ui| {
+                ui.heading("Sound & notifications");
+                ui.add_space(8.0);
+
+                ui.label("Clip save sound");
+                ui.horizontal(|ui| {
+                    let label = self
+                        .config
+                        .clip_sound_path
+                        .as_ref()
+                        .map(|p| path_display(p))
+                        .unwrap_or_else(|| "Bundled default".to_string());
+                    ui.label(label);
+                    if ui.add(theme::secondary_button("Browse…")).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Audio", &["wav", "ogg", "flac", "mp3"])
+                            .pick_file()
+                        {
+                            self.config.clip_sound_path = Some(path);
+                            self.persist_config();
+                        }
+                    }
+                    if ui
+                        .add_enabled(
+                            self.config.clip_sound_path.is_some(),
+                            theme::secondary_button("Clear"),
+                        )
+                        .clicked()
+                    {
+                        self.config.clip_sound_path = None;
+                        self.persist_config();
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Volume");
+                    let mut volume = self.config.sfx_volume;
+                    let response = ui.add(
+                        egui::DragValue::new(&mut volume)
+                            .speed(0.05)
+                            .range(0.0..=2.0)
+                            .suffix("×"),
+                    );
+                    if response.changed() {
+                        self.config.sfx_volume = volume;
+                        self.persist_config();
+                    }
+                });
+
+                if ui
+                    .checkbox(
+                        &mut self.config.clip_ready_notify_critical,
+                        "Critical urgency for Clip ready notification",
+                    )
+                    .on_hover_text(
+                        "Critical helps the notification show over fullscreen games on some \
+                         desktops (e.g. KDE). Turn off for quieter normal urgency.",
+                    )
+                    .changed()
+                {
+                    self.persist_config();
+                }
+
+                if ui
+                    .add(theme::secondary_button("Test sound"))
+                    .clicked()
+                {
+                    sfx::play_clip_saved(
+                        self.config.clip_sound_path.as_deref(),
+                        self.config.sfx_volume,
+                    );
                 }
             });
 

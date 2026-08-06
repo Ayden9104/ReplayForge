@@ -55,6 +55,9 @@ pub struct Config {
     pub output_dir: PathBuf,
     pub display: String,
     pub fps: u32,
+    /// Output resolution limit for GSR `-s` (`native` = monitor size).
+    #[serde(default = "default_resolution")]
+    pub resolution: String,
     pub buffer_seconds: u32,
     pub codec: String,
     pub hotkey: String,
@@ -84,11 +87,28 @@ pub struct Config {
     /// After saving a clip, open the trim page for it automatically.
     #[serde(default)]
     pub open_trim_after_save: bool,
+    /// Optional override for the clip-save cue; `None` uses the bundled WAV.
+    #[serde(default)]
+    pub clip_sound_path: Option<PathBuf>,
+    /// Linear gain for clip SFX (bundled, custom, and fallback). `1.0` is default loudness.
+    #[serde(default = "default_sfx_volume")]
+    pub sfx_volume: f32,
+    /// When true, "Clip ready" desktop notifications use critical urgency.
+    #[serde(default = "default_true")]
+    pub clip_ready_notify_critical: bool,
     pub first_run_complete: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_sfx_volume() -> f32 {
+    1.0
+}
+
+fn default_resolution() -> String {
+    "native".to_string()
 }
 
 impl Default for Config {
@@ -97,6 +117,7 @@ impl Default for Config {
             output_dir: default_videos_dir(),
             display: "screen".to_string(),
             fps: 60,
+            resolution: default_resolution(),
             buffer_seconds: 60,
             codec: "h264".to_string(),
             hotkey: "F8".to_string(),
@@ -111,6 +132,9 @@ impl Default for Config {
             auto_start_replay: false,
             minimize_to_tray: true,
             open_trim_after_save: false,
+            clip_sound_path: None,
+            sfx_volume: default_sfx_volume(),
+            clip_ready_notify_critical: true,
             first_run_complete: false,
         }
     }
@@ -219,6 +243,16 @@ pub fn hotkey_choices() -> &'static [&'static str] {
 
 pub fn codec_choices() -> &'static [&'static str] {
     &["h264", "hevc", "av1"]
+}
+
+/// `(config_value, ui_label)` pairs for recording resolution presets.
+pub fn resolution_choices() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("native", "Native (monitor)"),
+        ("1920x1080", "1080p"),
+        ("1280x720", "720p"),
+        ("2560x1440", "1440p"),
+    ]
 }
 
 pub fn quality_choices() -> &'static [QualityPreset] {
