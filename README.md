@@ -10,20 +10,22 @@ Start a rolling replay buffer with [GPU Screen Recorder](https://git.dec05eba.co
 - System + microphone audio (all desktop or selected apps)
 - Quality presets (Balanced / High / Ultra CBR)
 - Global save hotkey (portal on Wayland; X11 / evdev fallbacks)
-- Clips library: thumbnails, open, copy path, rename, delete, sort/filter
+- Clips library: thumbnails, open, copy path, rename, full-screen trim with filmstrip timeline, draggable playhead, in-app preview playback, delete, sort/filter
 - Desktop notification when a clip saves
 - Settings: display, FPS, buffer, codec, quality, audio, output, backend
 - System tray (show/hide, save, quit)
-- Autostart + minimize-to-tray
+- Autostart + minimize-to-tray + optional auto-start replay on launch
 - First-run setup (display, folder, audio, portal hotkey)
 - Config at `~/.config/replayforge/config.toml`
+- Dark UI theme (consistent trim and panel styling)
 
 ## Requirements
 
 - Linux (Wayland supported; global hotkeys via desktop portal — see below)
 - [gpu-screen-recorder](https://git.dec05eba.com/gpu-screen-recorder/) **or** Flatpak `com.dec05eba.gpu_screen_recorder`
-- `ffmpeg` / `ffprobe` (thumbnails + duration)
+- `ffmpeg` / `ffprobe` (thumbnails, trim, trim preview video decode)
 - Rust toolchain to build from source
+- `alsa-lib-devel` when building from source (trim preview audio via rodio)
 
 ### Optional / environment notes
 
@@ -36,6 +38,8 @@ Start a rolling replay buffer with [GPU Screen Recorder](https://git.dec05eba.co
 ```bash
 cargo build --release
 ```
+
+Fedora/Bazzite builders need `alsa-lib-devel` for trim preview audio (rodio/cpal; works with PipeWire via pipewire-alsa).
 
 Binary: `target/release/replayforge`
 
@@ -88,7 +92,9 @@ system_audio_mode = "all"   # all | apps
 audio_apps = []             # app names when mode is "apps" (GSR app:Name)
 backend = "auto"          # auto | host | flatpak
 autostart = false
+auto_start_replay = false
 minimize_to_tray = true
+open_trim_after_save = false
 first_run_complete = true
 ```
 

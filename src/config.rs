@@ -77,7 +77,13 @@ pub struct Config {
     pub quality: QualityPreset,
     pub backend: Backend,
     pub autostart: bool,
+    /// Start the replay buffer automatically when ReplayForge opens (after first-run).
+    #[serde(default)]
+    pub auto_start_replay: bool,
     pub minimize_to_tray: bool,
+    /// After saving a clip, open the trim page for it automatically.
+    #[serde(default)]
+    pub open_trim_after_save: bool,
     pub first_run_complete: bool,
 }
 
@@ -102,7 +108,9 @@ impl Default for Config {
             quality: QualityPreset::High,
             backend: Backend::Auto,
             autostart: false,
+            auto_start_replay: false,
             minimize_to_tray: true,
+            open_trim_after_save: false,
             first_run_complete: false,
         }
     }

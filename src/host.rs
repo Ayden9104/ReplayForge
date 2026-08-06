@@ -48,9 +48,25 @@ pub fn open_path(path: &Path) {
 
 /// Best-effort desktop notification (notify-send). Never fails the caller.
 pub fn notify_desktop(summary: &str, body: &str) {
+    notify_desktop_with_urgency(summary, body, "normal", 4000);
+}
+
+/// Desktop notification with urgency (`low` / `normal` / `critical`) and expire ms.
+pub fn notify_desktop_with_urgency(summary: &str, body: &str, urgency: &str, expire_ms: u32) {
+    let expire = expire_ms.to_string();
     let _ = host_command(
         "notify-send",
-        &["--app-name=ReplayForge", "-i", "replayforge", summary, body],
+        &[
+            "--app-name=ReplayForge",
+            "-i",
+            "replayforge",
+            "-u",
+            urgency,
+            "-t",
+            &expire,
+            summary,
+            body,
+        ],
     )
     .stdout(Stdio::null())
     .stderr(Stdio::null())

@@ -282,7 +282,7 @@ impl Recorder {
             Self::rename_clip(stable)?
         };
 
-        if let Err(error) = Self::generate_thumbnail(&renamed) {
+        if let Err(error) = crate::clips::generate_clip_thumbnail(&renamed) {
             eprintln!("{error}");
         }
 
@@ -390,40 +390,6 @@ impl Recorder {
         fs::rename(&path, &final_path)
             .map_err(|e| format!("Failed to rename clip to {}: {e}", final_path.display()))?;
         Ok(final_path)
-    }
-
-    fn generate_thumbnail(path: &PathBuf) -> Result<(), String> {
-        let thumbnail = path.with_extension("png");
-        let input = path.to_string_lossy();
-        let output = thumbnail.to_string_lossy();
-
-        let status = host_command(
-            "ffmpeg",
-            &[
-                "-y",
-                "-ss",
-                "0",
-                "-i",
-                &input,
-                "-frames:v",
-                "1",
-                "-update",
-                "1",
-                &output,
-            ],
-        )
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| format!("Failed to run ffmpeg for thumbnail: {e}"))?;
-
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "Thumbnail generation failed ({status}). Is ffmpeg installed?"
-            ))
-        }
     }
 }
 

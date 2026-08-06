@@ -19,4 +19,5 @@ image = "0.25.10"
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 serde = { version = "1", features = ["derive"] }
+rodio = "0.20"
 toml = "0.8"
