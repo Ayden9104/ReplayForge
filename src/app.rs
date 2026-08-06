@@ -280,6 +280,7 @@ impl ReplayForge {
 
         self.saving = true;
         self.toast("Saving clip…");
+        sfx::play_clip_saved();
         notify_desktop_with_urgency("Saving clip…", "Capturing your replay buffer", "low", 2500);
 
         let recorder = Arc::clone(&self.recorder);
@@ -312,11 +313,12 @@ impl ReplayForge {
                         self.toast(format!(
                             "Clip ready — {name}. Review it in Clips or press Trim."
                         ));
-                        notify_desktop(
+                        notify_desktop_with_urgency(
                             "Clip ready",
                             &format!("{name}\nOpen ReplayForge → Clips to review or trim."),
+                            "critical",
+                            5000,
                         );
-                        sfx::play_clip_saved();
                         self.clips_dirty = true;
                         self.clear_clip_caches();
                         self.clip_focus = Some(path.clone());
