@@ -40,12 +40,42 @@ impl QualityPreset {
         }
     }
 
-    /// GSR CBR bitrate in kbps (replay-friendly).
-    pub fn bitrate_kbps(self) -> u32 {
+    /// Base GSR CBR bitrate in kbps at 1080p (replay-friendly).
+    fn base_bitrate_kbps(self) -> u32 {
         match self {
             Self::Balanced => 8_000,
             Self::High => 15_000,
             Self::Ultra => 25_000,
+        }
+    }
+
+    /// GSR CBR bitrate in kbps, scaled by output resolution area vs 1080p.
+    pub fn bitrate_kbps(self, resolution: &str) -> u32 {
+        let base = self.base_bitrate_kbps() as f64;
+        let area_1080 = 1920.0 * 1080.0;
+        let area = resolution_pixel_area(resolution).unwrap_or(area_1080);
+        let scaled = (base * area / area_1080).round() as u32;
+        scaled.clamp(4_000, 60_000)
+    }
+}
+
+/// Pixel area for known resolution presets. `native` / unknown → `None` (treat as 1080p).
+fn resolution_pixel_area(resolution: &str) -> Option<f64> {
+    match resolution {
+        "native" | "" => None,
+        "1280x720" => Some(1280.0 * 720.0),
+        "1920x1080" => Some(1920.0 * 1080.0),
+        "2560x1440" => Some(2560.0 * 1440.0),
+        "3840x2160" => Some(3840.0 * 2160.0),
+        other => {
+            let (w, h) = other.split_once('x')?;
+            let w: f64 = w.parse().ok()?;
+            let h: f64 = h.parse().ok()?;
+            if w > 0.0 && h > 0.0 {
+                Some(w * h)
+            } else {
+                None
+            }
         }
     }
 }
@@ -252,6 +282,7 @@ pub fn resolution_choices() -> &'static [(&'static str, &'static str)] {
         ("1920x1080", "1080p"),
         ("1280x720", "720p"),
         ("2560x1440", "1440p"),
+        ("3840x2160", "4K"),
     ]
 }
 

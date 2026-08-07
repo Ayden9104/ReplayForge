@@ -72,8 +72,9 @@ Ensure `~/.local/bin` is on your `PATH` if the menu entry is missing and `replay
 
 ### Tray troubleshooting
 
-The tray needs a StatusNotifier / AppIndicator host. Some sessions (including Bazzite/KDE) may fail to create the icon; ReplayForge retries once after a short delay. If the tray stays unavailable:
+The tray needs a StatusNotifier / AppIndicator host. Some sessions (including Bazzite/KDE) may fail to create the icon; ReplayForge retries automatically (about 2s and 8s after startup). If the tray stays unavailable:
 
+- Use **Settings → Desktop → Retry tray** to try again.
 - Closing the window still **hides** the app when minimize-to-tray is enabled — reopen from the app menu.
 - Use **Quit** in the sidebar to stop the buffer and exit.
 
@@ -102,10 +103,10 @@ Example `config.toml`:
 output_dir = "/home/you/Videos/ReplayForge"
 display = "DP-1"
 fps = 60
-resolution = "native"       # native | 1920x1080 | 1280x720 | 2560x1440
+resolution = "native"       # native | 1920x1080 | 1280x720 | 2560x1440 | 3840x2160
 buffer_seconds = 60
 codec = "h264"
-quality = "high"            # balanced | high | ultra (CBR kbps)
+quality = "high"            # balanced | high | ultra (CBR kbps; scales with resolution)
 hotkey = "F8"
 portal_hotkey_enabled = false
 capture_system_audio = true

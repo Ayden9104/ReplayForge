@@ -425,7 +425,7 @@ fn build_gsr_args(config: &Config, fps: &str, buffer: &str, output: &str) -> Vec
         "-bm".into(),
         "cbr".into(),
         "-q".into(),
-        config.quality.bitrate_kbps().to_string(),
+        config.quality.bitrate_kbps(&config.resolution).to_string(),
         "-o".into(),
         output.to_string(),
     ];

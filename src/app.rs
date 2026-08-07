@@ -11,7 +11,7 @@ use crate::detect::{
     Detection, clip_duration_secs, format_bytes, format_duration, friendly_audio_app_label,
     probe_clip_meta,
 };
-use crate::host::{notify_desktop, notify_desktop_with_urgency, open_path};
+use crate::host::{notify_desktop, notify_desktop_with_urgency, open_path, reveal_in_file_manager};
 use crate::hotkeys::HotkeyService;
 use crate::recorder::Recorder;
 use crate::sfx;
@@ -28,6 +28,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 const CLIP_LOAD_MAX_INFLIGHT: usize = 3;
+/// Auto tray recreate delays after first failure (SNI may start late).
+const TRAY_RETRY_DELAYS_SECS: &[u64] = &[2, 8];
 
 #[derive(PartialEq)]
 enum Page {
@@ -120,7 +122,11 @@ pub struct ReplayForge {
     clip_focus: Option<PathBuf>,
     /// Set when StatusNotifier tray creation fails (Bazzite/session without SNI).
     tray_unavailable_reason: Option<String>,
-    /// When set, retry tray creation once at this instant (SNI may start late).
+    /// When the first tray create failed (for scheduled retries).
+    tray_fail_at: Option<Instant>,
+    /// Index into auto-retry delay schedule (`0` = first retry at +2s, `1` = second at +8s).
+    tray_retry_index: u8,
+    /// When set, retry tray creation at this instant.
     tray_retry_at: Option<Instant>,
     clip_sort: ClipSort,
     clip_filter: String,
@@ -138,17 +144,21 @@ impl ReplayForge {
         let show_first_run = config.is_first_run();
         let hotkeys = HotkeyService::start(&config.hotkey, config.portal_hotkey_enabled);
 
-        let (tray, tray_unavailable_reason, tray_retry_at) = match crate::tray::create_tray() {
-            Ok(tray) => (Some(tray), None, None),
-            Err(error) => {
-                eprintln!("Tray unavailable: {error}");
-                (
-                    None,
-                    Some(error),
-                    Some(Instant::now() + Duration::from_secs(2)),
-                )
-            }
-        };
+        let (tray, tray_unavailable_reason, tray_fail_at, tray_retry_index, tray_retry_at) =
+            match crate::tray::create_tray() {
+                Ok(tray) => (Some(tray), None, None, 0, None),
+                Err(error) => {
+                    eprintln!("Tray unavailable: {error}");
+                    let fail_at = Instant::now();
+                    (
+                        None,
+                        Some(error),
+                        Some(fail_at),
+                        0,
+                        Some(fail_at + Duration::from_secs(TRAY_RETRY_DELAYS_SECS[0])),
+                    )
+                }
+            };
 
         if let Err(error) = config.ensure_output_dir() {
             eprintln!("{error}");
@@ -208,6 +218,8 @@ impl ReplayForge {
             clip_thumb_inflight: HashSet::new(),
             clip_focus: None,
             tray_unavailable_reason,
+            tray_fail_at,
+            tray_retry_index,
             tray_retry_at,
             clip_sort: ClipSort::Newest,
             clip_filter: String::new(),
@@ -230,6 +242,57 @@ impl ReplayForge {
     fn persist_config(&mut self) {
         if let Err(error) = self.config.save() {
             self.toast(error);
+        }
+    }
+
+    /// Recreate the system tray. `manual` resets the auto-retry schedule.
+    fn try_recreate_tray(&mut self, manual: bool) {
+        if manual {
+            self.tray_fail_at = Some(Instant::now());
+            self.tray_retry_index = 0;
+            self.tray_retry_at = None;
+        }
+
+        match crate::tray::create_tray() {
+            Ok(tray) => {
+                if manual || self.tray.is_none() {
+                    eprintln!("Tray available{}", if manual { " (manual retry)" } else { " after retry" });
+                }
+                self.tray = Some(tray);
+                self.tray_unavailable_reason = None;
+                self.tray_fail_at = None;
+                self.tray_retry_index = 0;
+                self.tray_retry_at = None;
+                if manual {
+                    self.toast("System tray connected");
+                }
+            }
+            Err(error) => {
+                eprintln!("Tray recreate failed: {error}");
+                self.tray = None;
+                self.tray_unavailable_reason = Some(error.clone());
+                if manual {
+                    self.toast(format!("Tray still unavailable: {error}"));
+                    // Schedule auto retries from this manual attempt.
+                    let fail_at = Instant::now();
+                    self.tray_fail_at = Some(fail_at);
+                    self.tray_retry_index = 0;
+                    self.tray_retry_at =
+                        Some(fail_at + Duration::from_secs(TRAY_RETRY_DELAYS_SECS[0]));
+                } else {
+                    let fail_at = self.tray_fail_at.unwrap_or_else(Instant::now);
+                    self.tray_fail_at = Some(fail_at);
+                    let next = self.tray_retry_index as usize + 1;
+                    if next < TRAY_RETRY_DELAYS_SECS.len() {
+                        self.tray_retry_index = next as u8;
+                        self.tray_retry_at = Some(
+                            fail_at + Duration::from_secs(TRAY_RETRY_DELAYS_SECS[next]),
+                        );
+                    } else {
+                        self.tray_retry_at = None;
+                    }
+                }
+            }
         }
     }
 
@@ -1086,17 +1149,7 @@ impl eframe::App for ReplayForge {
             if let Some(retry_at) = self.tray_retry_at {
                 if Instant::now() >= retry_at {
                     self.tray_retry_at = None;
-                    match crate::tray::create_tray() {
-                        Ok(tray) => {
-                            eprintln!("Tray available after retry");
-                            self.tray = Some(tray);
-                            self.tray_unavailable_reason = None;
-                        }
-                        Err(error) => {
-                            eprintln!("Tray retry failed: {error}");
-                            self.tray_unavailable_reason = Some(error);
-                        }
-                    }
+                    self.try_recreate_tray(false);
                 } else {
                     ctx.request_repaint_after(retry_at.saturating_duration_since(Instant::now()));
                 }
@@ -1671,6 +1724,7 @@ impl ReplayForge {
 
                 let mut open_path_req: Option<PathBuf> = None;
                 let mut copy_path_req: Option<PathBuf> = None;
+                let mut reveal_req: Option<PathBuf> = None;
                 let mut start_trim_req: Option<PathBuf> = None;
                 let mut delete_req: Option<(PathBuf, PathBuf)> = None;
                 let mut start_rename: Option<PathBuf> = None;
@@ -1869,6 +1923,15 @@ impl ReplayForge {
                                                     copy_path_req = Some(clip_path.clone());
                                                 }
                                                 if ui
+                                                    .add(theme::secondary_button("Show in folder"))
+                                                    .on_hover_text(
+                                                        "Open the clips folder in your file manager",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    reveal_req = Some(clip_path.clone());
+                                                }
+                                                if ui
                                                     .add(theme::secondary_button("Rename"))
                                                     .clicked()
                                                 {
@@ -1916,6 +1979,10 @@ impl ReplayForge {
                 if let Some(path) = copy_path_req {
                     ui.ctx().copy_text(path.display().to_string());
                     self.toast("Path copied");
+                }
+
+                if let Some(path) = reveal_req {
+                    reveal_in_file_manager(&path);
                 }
 
                 if let Some(path) = start_trim_req {
@@ -2082,11 +2149,12 @@ impl ReplayForge {
 
                 ui.horizontal(|ui| {
                     ui.label("Quality");
+                    let res = self.config.resolution.as_str();
                     egui::ComboBox::from_id_salt("settings_quality")
                         .selected_text(format!(
                             "{} ({} kbps)",
                             self.config.quality.label(),
-                            self.config.quality.bitrate_kbps()
+                            self.config.quality.bitrate_kbps(res)
                         ))
                         .show_ui(ui, |ui| {
                             for preset in quality_choices() {
@@ -2097,7 +2165,7 @@ impl ReplayForge {
                                         format!(
                                             "{} ({} kbps)",
                                             preset.label(),
-                                            preset.bitrate_kbps()
+                                            preset.bitrate_kbps(res)
                                         ),
                                     )
                                     .changed()
@@ -2109,7 +2177,8 @@ impl ReplayForge {
                 });
                 ui.label(
                     egui::RichText::new(
-                        "Quality uses GSR constant bitrate (recommended for replay buffer).",
+                        "Quality uses GSR constant bitrate scaled for the selected resolution \
+                         (recommended for replay buffer).",
                     )
                     .color(theme::text_muted())
                     .size(12.0),
@@ -2418,6 +2487,34 @@ impl ReplayForge {
                 {
                     self.persist_config();
                 }
+
+                ui.horizontal(|ui| {
+                    let status = if self.tray.is_some() {
+                        "Available".to_string()
+                    } else {
+                        self.tray_unavailable_reason
+                            .as_deref()
+                            .map(|e| {
+                                let short = e.chars().take(80).collect::<String>();
+                                if e.len() > 80 {
+                                    format!("{short}…")
+                                } else {
+                                    short
+                                }
+                            })
+                            .unwrap_or_else(|| "Unavailable".into())
+                    };
+                    ui.label(format!("Tray: {status}"));
+                    if self.tray.is_none()
+                        && ui
+                            .add(theme::secondary_button("Retry tray"))
+                            .on_hover_text("Try creating the system tray icon again")
+                            .clicked()
+                    {
+                        self.try_recreate_tray(true);
+                    }
+                });
+
                 if ui
                     .checkbox(
                         &mut self.config.open_trim_after_save,

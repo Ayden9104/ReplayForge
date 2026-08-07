@@ -46,6 +46,15 @@ pub fn open_path(path: &Path) {
     }
 }
 
+/// Open the file manager at the clip's parent folder (best-effort).
+pub fn reveal_in_file_manager(path: &Path) {
+    if let Some(parent) = path.parent().filter(|p| p.as_os_str().len() > 0) {
+        open_path(parent);
+    } else {
+        open_path(path);
+    }
+}
+
 /// Best-effort desktop notification (notify-send). Never fails the caller.
 pub fn notify_desktop(summary: &str, body: &str) {
     notify_desktop_with_urgency(summary, body, "normal", 4000);
