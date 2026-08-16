@@ -55,7 +55,7 @@ If the build fails looking for `alsa` / `alsa.pc`, install ALSA development head
 
 Share uploads to ReplayForge cloud and copies a link. Clips are about **500 MB** max and expire after roughly **7 days**. You can turn Share off or change the endpoint under **Settings → Sharing**.
 
-## Common gotchas
+## Happy little accidents
 
 - **Wayland hotkeys / app audio:** run ReplayForge on the **host** session, not only inside a container, so it can talk to the desktop portal.
 - **Tray icon missing:** some desktops need a StatusNotifier / AppIndicator host. Try **Settings → Desktop → Retry tray**, or use **Quit** in the sidebar. Closing the window may only hide the app if minimize-to-tray is on.
