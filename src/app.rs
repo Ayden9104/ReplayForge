@@ -97,6 +97,9 @@ pub struct ReplayForge {
     share_rx: Option<Receiver<Result<String, String>>>,
     checking_update: bool,
     update_rx: Option<Receiver<Result<UpdateInfo, String>>>,
+    pending_update: Option<UpdateInfo>,
+    installing_update: bool,
+    update_install_rx: Option<Receiver<(Result<String, String>, String)>>,
     trim: Option<TrimState>,
     trimming: bool,
     trim_rx: Option<Receiver<Result<PathBuf, String>>>,
@@ -199,6 +202,9 @@ impl ReplayForge {
             share_rx: None,
             checking_update: false,
             update_rx: None,
+            pending_update: None,
+            installing_update: false,
+            update_install_rx: None,
             trim: None,
             trimming: false,
             trim_rx: None,
@@ -522,8 +528,9 @@ impl ReplayForge {
                                 "Update available: v{} (you have v{current})",
                                 info.latest
                             ));
-                            open_url(&info.html_url);
+                            self.pending_update = Some(info);
                         } else {
+                            self.pending_update = None;
                             self.toast(format!("You're on the latest version (v{current})"));
                         }
                     }
@@ -535,6 +542,61 @@ impl ReplayForge {
                 self.update_rx = None;
                 self.checking_update = false;
                 self.toast("Update check failed: worker disconnected");
+            }
+        }
+    }
+
+    fn install_update_action(&mut self) {
+        if self.installing_update {
+            self.toast("Update install already in progress…");
+            return;
+        }
+        let Some(info) = self.pending_update.clone() else {
+            self.toast("No pending update — check for updates first");
+            return;
+        };
+
+        self.installing_update = true;
+        self.toast(format!("Downloading and installing v{}…", info.latest));
+        let (tx, rx) = mpsc::channel();
+        self.update_install_rx = Some(rx);
+        let latest = info.latest.clone();
+        let html_url = info.html_url.clone();
+
+        thread::spawn(move || {
+            let result = update::install_update(&info).map(|_| latest);
+            let _ = tx.send((result, html_url));
+        });
+    }
+
+    fn poll_update_install_result(&mut self) {
+        let Some(rx) = &self.update_install_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok((result, html_url)) => {
+                self.update_install_rx = None;
+                self.installing_update = false;
+                match result {
+                    Ok(latest) => {
+                        self.pending_update = None;
+                        self.toast(format!(
+                            "Installed v{latest} — ReplayForge will quit; relaunch to finish"
+                        ));
+                        self.quit_requested = true;
+                    }
+                    Err(error) => {
+                        self.toast(error);
+                        open_url(&html_url);
+                    }
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.update_install_rx = None;
+                self.installing_update = false;
+                self.toast("Update install failed: worker disconnected");
             }
         }
     }
@@ -1321,6 +1383,7 @@ impl eframe::App for ReplayForge {
         self.poll_save_result();
         self.poll_share_result(ctx);
         self.poll_update_result();
+        self.poll_update_install_result();
         self.poll_trim_result();
         self.poll_trim_filmstrip(ctx);
         self.poll_trim_waveform();
@@ -2181,7 +2244,10 @@ impl ReplayForge {
         ui.heading("Settings");
         ui.add_space(8.0);
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             theme::section_frame().show(ui, |ui| {
                 ui.heading("Capture");
                 ui.add_space(8.0);
@@ -2820,9 +2886,10 @@ impl ReplayForge {
                 ui.label(format!("ReplayForge v{}", update::current_version()));
                 ui.add_space(6.0);
                 let checking = self.checking_update;
+                let installing = self.installing_update;
                 if ui
                     .add_enabled(
-                        !checking,
+                        !checking && !installing,
                         theme::secondary_button(if checking {
                             "Checking…"
                         } else {
@@ -2833,9 +2900,38 @@ impl ReplayForge {
                 {
                     self.check_for_updates_action();
                 }
+                if let Some(pending) = self.pending_update.clone() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(format!("v{} is ready to install", pending.latest))
+                            .color(theme::status_running()),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                !installing,
+                                theme::primary_button(if installing {
+                                    "Installing…"
+                                } else {
+                                    "Install update"
+                                }),
+                            )
+                            .clicked()
+                        {
+                            self.install_update_action();
+                        }
+                        if ui
+                            .add(theme::secondary_button("Open release notes"))
+                            .clicked()
+                        {
+                            open_url(&pending.html_url);
+                        }
+                    });
+                }
                 ui.label(
                     egui::RichText::new(
-                        "Checks GitHub for a newer release and opens the download page if one exists.",
+                        "Checks GitHub for a newer release, then can download and install \
+                         into ~/.local. Restart ReplayForge after installing.",
                     )
                     .color(theme::text_muted())
                     .size(12.0),
