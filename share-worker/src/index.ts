@@ -193,6 +193,7 @@ function sharedPageCss(): string {
       flex-direction: column;
       align-items: center;
       padding: 20px 16px 32px;
+      transition: background 420ms ease;
     }
     .brand-bar {
       display: flex;
@@ -203,12 +204,22 @@ function sharedPageCss(): string {
     .brand-bar.egg {
       cursor: pointer;
       user-select: none;
+      border-radius: 10px;
+      padding: 4px 8px 4px 4px;
+      transition: transform 160ms ease, background 200ms ease;
+    }
+    .brand-bar.egg:hover {
+      background: rgba(70, 130, 220, 0.08);
+    }
+    .brand-bar.egg:active {
+      transform: scale(0.98);
     }
     .mark {
       width: 36px;
       height: 36px;
       flex-shrink: 0;
       border-radius: 8px;
+      transition: transform 280ms ease;
     }
     .brand {
       font-size: clamp(1.35rem, 3.5vw, 1.75rem);
@@ -216,6 +227,7 @@ function sharedPageCss(): string {
       letter-spacing: -0.03em;
       color: var(--accent);
       margin: 0;
+      transition: color 280ms ease;
     }
     .tag {
       margin: 0 0 18px;
@@ -223,6 +235,8 @@ function sharedPageCss(): string {
       font-size: 0.9rem;
       text-align: center;
       font-weight: 500;
+      min-height: 1.35em;
+      transition: color 280ms ease, letter-spacing 280ms ease;
     }
     body.joe {
       background:
@@ -231,8 +245,19 @@ function sharedPageCss(): string {
         var(--bg);
     }
     body.joe .brand { color: #5ecfb8; }
+    body.joe .tag {
+      color: #9ecfc4;
+      font-style: italic;
+      letter-spacing: 0.01em;
+    }
+    body.joe .mark {
+      transform: rotate(-8deg) scale(1.06);
+    }
     body.joe .btn { background: #2eccb0; color: #102018; }
     body.joe .btn:hover { background: #4ad9c0; }
+    body.joe .brand-bar.egg:hover {
+      background: rgba(46, 204, 176, 0.12);
+    }
     .stage {
       width: min(1100px, 100%);
       animation: rise 280ms ease-out both;
@@ -299,7 +324,7 @@ function playerHtml(id: string): string {
   <style>${sharedPageCss()}</style>
 </head>
 <body>
-  <div class="brand-bar egg" id="brand-egg" title="…">
+  <div class="brand-bar egg" id="brand-egg" title="">
     ${brandMarkSvg()}
     <h1 class="brand">ReplayForge</h1>
   </div>

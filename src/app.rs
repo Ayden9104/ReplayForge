@@ -3051,27 +3051,27 @@ fn chill_toast(kind: ChillKind) -> &'static str {
     let lines: &[&str] = match kind {
         ChillKind::ClipReady => &[
             "Caught that wave",
-            "Highlight secured, dude",
             "Clip's in the barrel",
-            "Nice ride — it's saved",
+            "Nice ride — saved",
+            "It's all good — clip's ready",
         ],
         ChillKind::Share => &[
             "Link's out in the water",
             "Shared. Go with the flow",
-            "Link copied — hang ten",
-            "It's all good — link's ready",
+            "Hang ten — link copied",
+            "Chicken Joe cleared it for takeoff",
         ],
         ChillKind::Delete => &[
             "Gone with the tide",
-            "Wiped clean, brah",
             "That clip paddled out",
-            "Deleted. Still chill",
+            "Wiped. Still chill",
+            "No worries — it's gone",
         ],
         ChillKind::Trim => &[
             "Edited. Still gnarly",
-            "Trimmed — keep the best section",
-            "Cut clean. Cowabunga",
             "Shaped that wave",
+            "Cut clean — keep the best bit",
+            "Trimmed. Cowabunga",
         ],
     };
     let seed = SystemTime::now()
