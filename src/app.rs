@@ -15,13 +15,14 @@ use crate::host::{notify_desktop, notify_desktop_with_urgency, open_path, reveal
 use crate::hotkeys::HotkeyService;
 use crate::recorder::Recorder;
 use crate::sfx;
+use crate::share;
 use crate::theme;
 use crate::tray::{TrayCommand, TrayHandle};
 use crate::trim_playback::TrimPlayback;
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -89,6 +90,8 @@ pub struct ReplayForge {
     quit_requested: bool,
     saving: bool,
     save_rx: Option<Receiver<Result<PathBuf, String>>>,
+    sharing: bool,
+    share_rx: Option<Receiver<Result<String, String>>>,
     trim: Option<TrimState>,
     trimming: bool,
     trim_rx: Option<Receiver<Result<PathBuf, String>>>,
@@ -187,6 +190,8 @@ impl ReplayForge {
             quit_requested: false,
             saving: false,
             save_rx: None,
+            sharing: false,
+            share_rx: None,
             trim: None,
             trimming: false,
             trim_rx: None,
@@ -256,7 +261,14 @@ impl ReplayForge {
         match crate::tray::create_tray() {
             Ok(tray) => {
                 if manual || self.tray.is_none() {
-                    eprintln!("Tray available{}", if manual { " (manual retry)" } else { " after retry" });
+                    eprintln!(
+                        "Tray available{}",
+                        if manual {
+                            " (manual retry)"
+                        } else {
+                            " after retry"
+                        }
+                    );
                 }
                 self.tray = Some(tray);
                 self.tray_unavailable_reason = None;
@@ -285,9 +297,8 @@ impl ReplayForge {
                     let next = self.tray_retry_index as usize + 1;
                     if next < TRAY_RETRY_DELAYS_SECS.len() {
                         self.tray_retry_index = next as u8;
-                        self.tray_retry_at = Some(
-                            fail_at + Duration::from_secs(TRAY_RETRY_DELAYS_SECS[next]),
-                        );
+                        self.tray_retry_at =
+                            Some(fail_at + Duration::from_secs(TRAY_RETRY_DELAYS_SECS[next]));
                     } else {
                         self.tray_retry_at = None;
                     }
@@ -413,6 +424,61 @@ impl ReplayForge {
                 self.save_rx = None;
                 self.saving = false;
                 self.toast("Save failed: worker disconnected");
+            }
+        }
+    }
+
+    fn share_link_action(&mut self, path: PathBuf) {
+        if self.sharing {
+            self.toast("Share already in progress…");
+            return;
+        }
+        if !path.is_file() {
+            self.toast("Clip file not found");
+            return;
+        }
+        let api_base = self.config.share_api_base.trim().to_string();
+        if api_base.is_empty() {
+            self.toast("Share is disabled — enable ReplayForge cloud in Settings → Sharing");
+            self.page = Page::Settings;
+            return;
+        }
+
+        self.sharing = true;
+        self.toast("Uploading share link…");
+        let (tx, rx) = mpsc::channel();
+        self.share_rx = Some(rx);
+
+        thread::spawn(move || {
+            let result = share::upload_share_link(&path, &api_base);
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_share_result(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.share_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(result) => {
+                self.share_rx = None;
+                self.sharing = false;
+                match result {
+                    Ok(url) => {
+                        let note = share::share_link_note(&url);
+                        ctx.copy_text(url.clone());
+                        self.toast(format!("Link copied — {note}"));
+                        notify_desktop("Share link ready", &format!("{note}\n{url}"));
+                    }
+                    Err(error) => self.toast(error),
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.share_rx = None;
+                self.sharing = false;
+                self.toast("Share failed: worker disconnected");
             }
         }
     }
@@ -1197,6 +1263,7 @@ impl eframe::App for ReplayForge {
         }
 
         self.poll_save_result();
+        self.poll_share_result(ctx);
         self.poll_trim_result();
         self.poll_trim_filmstrip(ctx);
         self.poll_trim_waveform();
@@ -1623,6 +1690,68 @@ impl ReplayForge {
         ui.heading("Clips");
         ui.add_space(8.0);
 
+        let clips_folder = self.config.output_dir.clone();
+        let _ = self.clips_dirty;
+        self.clips_dirty = false;
+
+        let (all_clips, read_error) = match fs::read_dir(&clips_folder) {
+            Ok(entries) => {
+                let clips: Vec<PathBuf> = entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.extension()
+                            .and_then(|extension| extension.to_str())
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+                    })
+                    .collect();
+                (clips, None)
+            }
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
+
+        if let Some(error) = read_error {
+            ui.colored_label(theme::error(), format!("Cannot read clips folder: {error}"));
+            return;
+        }
+
+        let library_count = all_clips.len();
+        let library_bytes: u64 = all_clips.iter().map(|p| clip_storage_bytes(p)).sum();
+
+        let filter = self.clip_filter.trim().to_ascii_lowercase();
+        let mut clips = all_clips;
+        if !filter.is_empty() {
+            clips.retain(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.to_ascii_lowercase().contains(&filter))
+                    .unwrap_or(false)
+            });
+        }
+
+        match self.clip_sort {
+            ClipSort::Name => {
+                clips.sort();
+                clips.reverse();
+            }
+            ClipSort::Newest => {
+                clips.sort_by_key(|path| {
+                    fs::metadata(path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(SystemTime::UNIX_EPOCH)
+                });
+                clips.reverse();
+            }
+            ClipSort::Largest => {
+                clips.sort_by_key(|path| fs::metadata(path).map(|m| m.len()).unwrap_or(0));
+                clips.reverse();
+            }
+        }
+
+        let visible_count = clips.len();
+        let visible_bytes: u64 = clips.iter().map(|p| clip_storage_bytes(p)).sum();
+        let filter_active = !filter.is_empty();
+
         theme::section_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.add(theme::secondary_button("Refresh")).clicked() {
@@ -1652,396 +1781,337 @@ impl ReplayForge {
                         .desired_width(180.0)
                         .hint_text("Search filename…"),
                 );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    draw_clips_storage_stats(
+                        ui,
+                        visible_count,
+                        visible_bytes,
+                        library_count,
+                        library_bytes,
+                        filter_active,
+                    );
+                });
             });
         });
 
         ui.add_space(12.0);
 
-        let clips_folder = self.config.output_dir.clone();
-        let _ = self.clips_dirty;
-        self.clips_dirty = false;
-
-        match fs::read_dir(&clips_folder) {
-            Ok(entries) => {
-                let mut clips: Vec<PathBuf> = entries
-                    .filter_map(Result::ok)
-                    .map(|entry| entry.path())
-                    .filter(|path| {
-                        path.extension()
-                            .and_then(|extension| extension.to_str())
-                            .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
-                    })
-                    .collect();
-
-                let filter = self.clip_filter.trim().to_ascii_lowercase();
-                if !filter.is_empty() {
-                    clips.retain(|path| {
-                        path.file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|n| n.to_ascii_lowercase().contains(&filter))
-                            .unwrap_or(false)
-                    });
+        if clips.is_empty() {
+            theme::section_frame().show(ui, |ui| {
+                ui.set_max_width(420.0);
+                if filter.is_empty() {
+                    ui.label(
+                        egui::RichText::new("No clips yet. Start replay and hit Save Clip.")
+                            .color(theme::text_muted()),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("No clips match that filter.")
+                            .color(theme::text_muted()),
+                    );
                 }
+            });
+            return;
+        }
 
-                match self.clip_sort {
-                    ClipSort::Name => {
-                        clips.sort();
-                        clips.reverse();
-                    }
-                    ClipSort::Newest => {
-                        clips.sort_by_key(|path| {
-                            fs::metadata(path)
-                                .and_then(|m| m.modified())
-                                .unwrap_or(SystemTime::UNIX_EPOCH)
-                        });
-                        clips.reverse();
-                    }
-                    ClipSort::Largest => {
-                        clips.sort_by_key(|path| fs::metadata(path).map(|m| m.len()).unwrap_or(0));
-                        clips.reverse();
-                    }
-                }
+        let mut open_path_req: Option<PathBuf> = None;
+        let mut copy_path_req: Option<PathBuf> = None;
+        let mut reveal_req: Option<PathBuf> = None;
+        let mut share_link_req: Option<PathBuf> = None;
+        let mut start_trim_req: Option<PathBuf> = None;
+        let mut delete_req: Option<(PathBuf, PathBuf)> = None;
+        let mut start_rename: Option<PathBuf> = None;
+        let mut finish_rename: Option<(PathBuf, String)> = None;
+        let mut cancel_rename = false;
 
-                if clips.is_empty() {
-                    theme::section_frame().show(ui, |ui| {
-                        ui.set_max_width(420.0);
-                        if filter.is_empty() {
-                            ui.label(
-                                egui::RichText::new(
-                                    "No clips yet. Start replay and hit Save Clip.",
-                                )
-                                .color(theme::text_muted()),
-                            );
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let gap = 16.0;
+            let min_card_outer = 300.0;
+            // Matches theme::card_frame() Margin::same(14) on left+right.
+            let frame_pad_x = 28.0;
+            let available = ui.available_width();
+            let columns = ((available + gap) / (min_card_outer + gap))
+                .floor()
+                .max(1.0) as usize;
+            let card_outer = (available - gap * columns.saturating_sub(1) as f32) / columns as f32;
+            let card_inner = (card_outer - frame_pad_x).max(160.0);
+            let thumb_w = card_inner;
+            let thumb_h = thumb_w * 9.0 / 16.0;
+
+            egui::Grid::new("clips_grid")
+                .num_columns(columns)
+                .spacing([gap, gap])
+                .show(ui, |ui| {
+                    for (index, clip_path) in clips.iter().enumerate() {
+                        let clip_name = clip_path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("Unknown clip")
+                            .to_string();
+
+                        let thumbnail_path = clip_path.with_extension("png");
+                        let meta_cached = self.clip_meta.get(clip_path).cloned();
+                        let size_fallback = fs::metadata(clip_path)
+                            .map(|m| format_bytes(m.len()))
+                            .unwrap_or_else(|_| "?".into());
+
+                        let focused = self.clip_focus.as_ref() == Some(clip_path);
+                        let card = if focused {
+                            theme::card_frame_focused()
                         } else {
-                            ui.label(
-                                egui::RichText::new("No clips match that filter.")
-                                    .color(theme::text_muted()),
-                            );
-                        }
-                    });
-                    return;
-                }
+                            theme::card_frame()
+                        };
 
-                let mut open_path_req: Option<PathBuf> = None;
-                let mut copy_path_req: Option<PathBuf> = None;
-                let mut reveal_req: Option<PathBuf> = None;
-                let mut start_trim_req: Option<PathBuf> = None;
-                let mut delete_req: Option<(PathBuf, PathBuf)> = None;
-                let mut start_rename: Option<PathBuf> = None;
-                let mut finish_rename: Option<(PathBuf, String)> = None;
-                let mut cancel_rename = false;
+                        let card_response = card.show(ui, |ui| {
+                            ui.set_min_width(card_inner);
+                            ui.set_max_width(card_inner);
+                            ui.vertical(|ui| {
+                                let has_texture = self.textures.contains_key(&thumbnail_path);
+                                let thumb_exists = thumbnail_path.exists();
 
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let gap = 16.0;
-                    let min_card_outer = 300.0;
-                    // Matches theme::card_frame() Margin::same(14) on left+right.
-                    let frame_pad_x = 28.0;
-                    let available = ui.available_width();
-                    let columns = ((available + gap) / (min_card_outer + gap))
-                        .floor()
-                        .max(1.0) as usize;
-                    let card_outer =
-                        (available - gap * columns.saturating_sub(1) as f32) / columns as f32;
-                    let card_inner = (card_outer - frame_pad_x).max(160.0);
-                    let thumb_w = card_inner;
-                    let thumb_h = thumb_w * 9.0 / 16.0;
-
-                    egui::Grid::new("clips_grid")
-                        .num_columns(columns)
-                        .spacing([gap, gap])
-                        .show(ui, |ui| {
-                            for (index, clip_path) in clips.iter().enumerate() {
-                                let clip_name = clip_path
-                                    .file_name()
-                                    .and_then(|name| name.to_str())
-                                    .unwrap_or("Unknown clip")
-                                    .to_string();
-
-                                let thumbnail_path = clip_path.with_extension("png");
-                                let meta_cached = self.clip_meta.get(clip_path).cloned();
-                                let size_fallback = fs::metadata(clip_path)
-                                    .map(|m| format_bytes(m.len()))
-                                    .unwrap_or_else(|_| "?".into());
-
-                                let focused = self.clip_focus.as_ref() == Some(clip_path);
-                                let card = if focused {
-                                    theme::card_frame_focused()
+                                if has_texture {
+                                    if let Some(texture) = self.textures.get(&thumbnail_path) {
+                                        let response = ui.add(
+                                            egui::Image::new(texture)
+                                                .fit_to_exact_size(egui::vec2(thumb_w, thumb_h))
+                                                .corner_radius(6.0),
+                                        );
+                                        if response.clicked() {
+                                            open_path_req = Some(clip_path.clone());
+                                        }
+                                        if ui.is_rect_visible(response.rect)
+                                            && meta_cached.is_none()
+                                        {
+                                            self.schedule_clip_meta(clip_path.clone());
+                                        }
+                                    }
                                 } else {
-                                    theme::card_frame()
-                                };
-
-                                let card_response = card.show(ui, |ui| {
-                                    ui.set_min_width(card_inner);
-                                    ui.set_max_width(card_inner);
-                                    ui.vertical(|ui| {
-                                        let has_texture =
-                                            self.textures.contains_key(&thumbnail_path);
-                                        let thumb_exists = thumbnail_path.exists();
-
-                                        if has_texture {
-                                            if let Some(texture) =
-                                                self.textures.get(&thumbnail_path)
-                                            {
-                                                let response = ui.add(
-                                                    egui::Image::new(texture)
-                                                        .fit_to_exact_size(egui::vec2(
-                                                            thumb_w, thumb_h,
-                                                        ))
-                                                        .corner_radius(6.0),
-                                                );
-                                                if response.clicked() {
-                                                    open_path_req = Some(clip_path.clone());
-                                                }
-                                                if ui.is_rect_visible(response.rect)
-                                                    && meta_cached.is_none()
-                                                {
-                                                    self.schedule_clip_meta(clip_path.clone());
-                                                }
-                                            }
+                                    let (thumb_rect, thumb_response) = ui.allocate_exact_size(
+                                        egui::vec2(thumb_w, thumb_h),
+                                        egui::Sense::click(),
+                                    );
+                                    ui.painter().rect_filled(
+                                        thumb_rect,
+                                        6.0,
+                                        theme::surface_track(),
+                                    );
+                                    let placeholder = if thumb_exists {
+                                        if self.clip_thumb_inflight.contains(&thumbnail_path) {
+                                            "Loading…"
                                         } else {
-                                            let (thumb_rect, thumb_response) = ui
-                                                .allocate_exact_size(
-                                                    egui::vec2(thumb_w, thumb_h),
-                                                    egui::Sense::click(),
-                                                );
-                                            ui.painter().rect_filled(
-                                                thumb_rect,
-                                                6.0,
-                                                theme::surface_track(),
-                                            );
-                                            let placeholder = if thumb_exists {
-                                                if self
-                                                    .clip_thumb_inflight
-                                                    .contains(&thumbnail_path)
-                                                {
-                                                    "Loading…"
-                                                } else {
-                                                    "…"
-                                                }
-                                            } else {
-                                                "No thumbnail"
-                                            };
-                                            ui.painter().text(
-                                                thumb_rect.center(),
-                                                egui::Align2::CENTER_CENTER,
-                                                placeholder,
-                                                egui::FontId::proportional(13.0),
-                                                theme::text_muted(),
-                                            );
-                                            if thumb_response.clicked() && thumb_exists {
+                                            "…"
+                                        }
+                                    } else {
+                                        "No thumbnail"
+                                    };
+                                    ui.painter().text(
+                                        thumb_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        placeholder,
+                                        egui::FontId::proportional(13.0),
+                                        theme::text_muted(),
+                                    );
+                                    if thumb_response.clicked() && thumb_exists {
+                                        open_path_req = Some(clip_path.clone());
+                                    }
+                                    let visible = ui.is_rect_visible(thumb_rect);
+                                    if visible && thumb_exists {
+                                        self.schedule_clip_thumb(thumbnail_path.clone());
+                                    }
+                                    if visible && meta_cached.is_none() {
+                                        self.schedule_clip_meta(clip_path.clone());
+                                    }
+                                }
+
+                                ui.add_space(8.0);
+
+                                let renaming =
+                                    self.rename.as_ref().is_some_and(|r| r.path == *clip_path);
+
+                                if renaming {
+                                    if let Some(state) = self.rename.as_mut() {
+                                        ui.text_edit_singleline(&mut state.text);
+                                        ui.horizontal(|ui| {
+                                            if ui.add(theme::primary_button("Save")).clicked() {
+                                                finish_rename =
+                                                    Some((state.path.clone(), state.text.clone()));
+                                            }
+                                            if ui.add(theme::secondary_button("Cancel")).clicked() {
+                                                cancel_rename = true;
+                                            }
+                                        });
+                                    }
+                                } else {
+                                    if focused {
+                                        ui.label(
+                                            egui::RichText::new("Just saved")
+                                                .color(theme::accent_bright())
+                                                .size(11.0)
+                                                .strong(),
+                                        );
+                                    }
+                                    ui.label(egui::RichText::new(&clip_name).strong().size(14.0));
+                                    let meta_line = if let Some((duration, size)) = &meta_cached {
+                                        format!("{duration} · {size}")
+                                    } else if self.clip_meta_inflight.contains(clip_path) {
+                                        format!("Loading… · {size_fallback}")
+                                    } else {
+                                        format!("--:-- · {size_fallback}")
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(meta_line)
+                                            .color(theme::text_muted())
+                                            .size(12.0),
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.horizontal_wrapped(|ui| {
+                                        if focused {
+                                            if ui.add(theme::primary_button("Trim")).clicked() {
+                                                start_trim_req = Some(clip_path.clone());
+                                            }
+                                            if ui.add(theme::secondary_button("Open")).clicked() {
                                                 open_path_req = Some(clip_path.clone());
                                             }
-                                            let visible = ui.is_rect_visible(thumb_rect);
-                                            if visible && thumb_exists {
-                                                self.schedule_clip_thumb(thumbnail_path.clone());
-                                            }
-                                            if visible && meta_cached.is_none() {
-                                                self.schedule_clip_meta(clip_path.clone());
-                                            }
+                                        } else if ui.add(theme::secondary_button("Open")).clicked()
+                                        {
+                                            open_path_req = Some(clip_path.clone());
                                         }
-
-                                        ui.add_space(8.0);
-
-                                        let renaming = self
-                                            .rename
-                                            .as_ref()
-                                            .is_some_and(|r| r.path == *clip_path);
-
-                                        if renaming {
-                                            if let Some(state) = self.rename.as_mut() {
-                                                ui.text_edit_singleline(&mut state.text);
-                                                ui.horizontal(|ui| {
-                                                    if ui
-                                                        .add(theme::primary_button("Save"))
-                                                        .clicked()
-                                                    {
-                                                        finish_rename = Some((
-                                                            state.path.clone(),
-                                                            state.text.clone(),
-                                                        ));
-                                                    }
-                                                    if ui
-                                                        .add(theme::secondary_button("Cancel"))
-                                                        .clicked()
-                                                    {
-                                                        cancel_rename = true;
-                                                    }
-                                                });
-                                            }
-                                        } else {
-                                            if focused {
-                                                ui.label(
-                                                    egui::RichText::new("Just saved")
-                                                        .color(theme::accent_bright())
-                                                        .size(11.0)
-                                                        .strong(),
-                                                );
-                                            }
-                                            ui.label(
-                                                egui::RichText::new(&clip_name).strong().size(14.0),
-                                            );
-                                            let meta_line = if let Some((duration, size)) =
-                                                &meta_cached
-                                            {
-                                                format!("{duration} · {size}")
-                                            } else if self.clip_meta_inflight.contains(clip_path) {
-                                                format!("Loading… · {size_fallback}")
-                                            } else {
-                                                format!("--:-- · {size_fallback}")
-                                            };
-                                            ui.label(
-                                                egui::RichText::new(meta_line)
-                                                    .color(theme::text_muted())
-                                                    .size(12.0),
-                                            );
-                                            ui.add_space(4.0);
-                                            ui.horizontal_wrapped(|ui| {
-                                                if focused {
-                                                    if ui
-                                                        .add(theme::primary_button("Trim"))
-                                                        .clicked()
-                                                    {
-                                                        start_trim_req = Some(clip_path.clone());
-                                                    }
-                                                    if ui
-                                                        .add(theme::secondary_button("Open"))
-                                                        .clicked()
-                                                    {
-                                                        open_path_req = Some(clip_path.clone());
-                                                    }
-                                                } else if ui
-                                                    .add(theme::secondary_button("Open"))
-                                                    .clicked()
-                                                {
-                                                    open_path_req = Some(clip_path.clone());
-                                                }
-                                                if ui
-                                                    .add(theme::secondary_button("Copy path"))
-                                                    .on_hover_text("Copy full path to clipboard")
-                                                    .clicked()
-                                                {
-                                                    copy_path_req = Some(clip_path.clone());
-                                                }
-                                                if ui
-                                                    .add(theme::secondary_button("Show in folder"))
-                                                    .on_hover_text(
-                                                        "Open the clips folder in your file manager",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    reveal_req = Some(clip_path.clone());
-                                                }
-                                                if ui
-                                                    .add(theme::secondary_button("Rename"))
-                                                    .clicked()
-                                                {
-                                                    start_rename = Some(clip_path.clone());
-                                                }
-                                                if !focused
-                                                    && ui
-                                                        .add(theme::primary_button("Trim"))
-                                                        .clicked()
-                                                {
-                                                    start_trim_req = Some(clip_path.clone());
-                                                }
-                                                if ui.button("Delete").clicked() {
-                                                    delete_req = Some((
-                                                        clip_path.clone(),
-                                                        thumbnail_path.clone(),
-                                                    ));
-                                                }
-                                            });
+                                        if ui
+                                            .add(theme::secondary_button("Copy path"))
+                                            .on_hover_text("Copy full path to clipboard")
+                                            .clicked()
+                                        {
+                                            copy_path_req = Some(clip_path.clone());
+                                        }
+                                        if ui
+                                            .add(theme::secondary_button("Show in folder"))
+                                            .on_hover_text(
+                                                "Open the clips folder in your file manager",
+                                            )
+                                            .clicked()
+                                        {
+                                            reveal_req = Some(clip_path.clone());
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                !self.sharing,
+                                                theme::secondary_button(if self.sharing {
+                                                    "Sharing…"
+                                                } else {
+                                                    "Share link"
+                                                }),
+                                            )
+                                            .on_hover_text(
+                                                "Upload to ReplayForge cloud and copy link",
+                                            )
+                                            .clicked()
+                                        {
+                                            share_link_req = Some(clip_path.clone());
+                                        }
+                                        if ui.add(theme::secondary_button("Rename")).clicked() {
+                                            start_rename = Some(clip_path.clone());
+                                        }
+                                        if !focused
+                                            && ui.add(theme::primary_button("Trim")).clicked()
+                                        {
+                                            start_trim_req = Some(clip_path.clone());
+                                        }
+                                        if ui.button("Delete").clicked() {
+                                            delete_req =
+                                                Some((clip_path.clone(), thumbnail_path.clone()));
                                         }
                                     });
-                                });
-
-                                if focused {
-                                    card_response
-                                        .response
-                                        .scroll_to_me(Some(egui::Align::Center));
                                 }
-
-                                if (index + 1) % columns == 0 {
-                                    ui.end_row();
-                                }
-                            }
-
-                            if !clips.is_empty() && clips.len() % columns != 0 {
-                                ui.end_row();
-                            }
+                            });
                         });
-                });
 
-                if let Some(path) = open_path_req {
-                    open_path(&path);
-                }
+                        if focused {
+                            card_response
+                                .response
+                                .scroll_to_me(Some(egui::Align::Center));
+                        }
 
-                if let Some(path) = copy_path_req {
-                    ui.ctx().copy_text(path.display().to_string());
-                    self.toast("Path copied");
-                }
-
-                if let Some(path) = reveal_req {
-                    reveal_in_file_manager(&path);
-                }
-
-                if let Some(path) = start_trim_req {
-                    self.open_trim(path);
-                }
-
-                if let Some(path) = start_rename {
-                    let text = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("clip")
-                        .to_string();
-                    self.rename = Some(RenameState { path, text });
-                }
-
-                if cancel_rename {
-                    self.rename = None;
-                }
-
-                if let Some((old_path, new_stem)) = finish_rename {
-                    let new_stem = new_stem.trim();
-                    if !new_stem.is_empty() {
-                        let new_path = old_path.with_file_name(format!("{new_stem}.mp4"));
-                        let old_thumb = old_path.with_extension("png");
-                        let new_thumb = new_path.with_extension("png");
-                        match fs::rename(&old_path, &new_path) {
-                            Ok(()) => {
-                                if old_thumb.exists() {
-                                    let _ = fs::rename(&old_thumb, &new_thumb);
-                                }
-                                if self.clip_focus.as_ref() == Some(&old_path) {
-                                    self.clip_focus = Some(new_path);
-                                }
-                                self.clear_clip_caches();
-                                self.toast("Clip renamed");
-                            }
-                            Err(error) => self.toast(format!("Rename failed: {error}")),
+                        if (index + 1) % columns == 0 {
+                            ui.end_row();
                         }
                     }
-                    self.rename = None;
-                }
 
-                if let Some((clip_path, thumbnail_path)) = delete_req {
-                    if let Err(error) = fs::remove_file(&clip_path) {
-                        self.toast(format!("Failed to delete clip: {error}"));
-                    } else {
-                        if thumbnail_path.exists() {
-                            let _ = fs::remove_file(&thumbnail_path);
+                    if !clips.is_empty() && clips.len() % columns != 0 {
+                        ui.end_row();
+                    }
+                });
+        });
+
+        if let Some(path) = open_path_req {
+            open_path(&path);
+        }
+
+        if let Some(path) = copy_path_req {
+            ui.ctx().copy_text(path.display().to_string());
+            self.toast("Path copied");
+        }
+
+        if let Some(path) = reveal_req {
+            reveal_in_file_manager(&path);
+        }
+
+        if let Some(path) = share_link_req {
+            self.share_link_action(path);
+        }
+
+        if let Some(path) = start_trim_req {
+            self.open_trim(path);
+        }
+
+        if let Some(path) = start_rename {
+            let text = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("clip")
+                .to_string();
+            self.rename = Some(RenameState { path, text });
+        }
+
+        if cancel_rename {
+            self.rename = None;
+        }
+
+        if let Some((old_path, new_stem)) = finish_rename {
+            let new_stem = new_stem.trim();
+            if !new_stem.is_empty() {
+                let new_path = old_path.with_file_name(format!("{new_stem}.mp4"));
+                let old_thumb = old_path.with_extension("png");
+                let new_thumb = new_path.with_extension("png");
+                match fs::rename(&old_path, &new_path) {
+                    Ok(()) => {
+                        if old_thumb.exists() {
+                            let _ = fs::rename(&old_thumb, &new_thumb);
                         }
-                        if self.clip_focus.as_ref() == Some(&clip_path) {
-                            self.clip_focus = None;
+                        if self.clip_focus.as_ref() == Some(&old_path) {
+                            self.clip_focus = Some(new_path);
                         }
                         self.clear_clip_caches();
-                        self.toast("Clip deleted");
+                        self.toast("Clip renamed");
                     }
+                    Err(error) => self.toast(format!("Rename failed: {error}")),
                 }
             }
-            Err(error) => {
-                ui.label(format!("Could not open clips folder: {error}"));
+            self.rename = None;
+        }
+
+        if let Some((clip_path, thumbnail_path)) = delete_req {
+            if let Err(error) = fs::remove_file(&clip_path) {
+                self.toast(format!("Failed to delete clip: {error}"));
+            } else {
+                if thumbnail_path.exists() {
+                    let _ = fs::remove_file(&thumbnail_path);
+                }
+                if self.clip_focus.as_ref() == Some(&clip_path) {
+                    self.clip_focus = None;
+                }
+                self.clear_clip_caches();
+                self.toast("Clip deleted");
             }
         }
     }
@@ -2606,6 +2676,81 @@ impl ReplayForge {
                 }
             });
 
+            ui.add_space(12.0);
+
+            theme::section_frame().show(ui, |ui| {
+                ui.heading("Sharing");
+                ui.add_space(8.0);
+
+                let default_base = crate::config::default_share_api_base();
+                let current = self.config.share_api_base.trim();
+                let using_cloud = current == default_base.trim();
+                let disabled = current.is_empty();
+
+                if disabled {
+                    ui.label(
+                        egui::RichText::new("Share link is disabled.")
+                            .color(theme::text_muted()),
+                    );
+                } else if using_cloud {
+                    ui.label(
+                        egui::RichText::new("Using ReplayForge cloud (Cloudflare).")
+                            .color(theme::status_running()),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new("Using a custom Share API base.")
+                            .color(theme::text_muted_light()),
+                    );
+                }
+
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new("API base (advanced)")
+                        .color(theme::text_muted())
+                        .size(12.0),
+                );
+                ui.horizontal(|ui| {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.config.share_api_base)
+                            .desired_width(ui.available_width().min(480.0).max(220.0))
+                            .hint_text(&default_base),
+                    );
+                    if response.changed() {
+                        self.persist_config();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(theme::secondary_button("Use ReplayForge cloud"))
+                        .clicked()
+                    {
+                        self.config.share_api_base = default_base;
+                        self.persist_config();
+                        self.toast("Share set to ReplayForge cloud");
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.config.share_api_base.trim().is_empty(),
+                            theme::secondary_button("Disable"),
+                        )
+                        .clicked()
+                    {
+                        self.config.share_api_base.clear();
+                        self.persist_config();
+                        self.toast("Share disabled");
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Share link uploads clips to ReplayForge cloud (max ~500 MB; \
+                         links expire after ~7 days). Requires curl on PATH.",
+                    )
+                    .color(theme::text_muted())
+                    .size(12.0),
+                );
+            });
+
             ui.add_space(16.0);
             if self.settings_dirty {
                 if ui
@@ -2891,4 +3036,101 @@ impl ReplayForge {
             self.apply_trim();
         }
     }
+}
+
+fn clip_storage_bytes(mp4: &Path) -> u64 {
+    let mut n = fs::metadata(mp4).map(|m| m.len()).unwrap_or(0);
+    let thumb = mp4.with_extension("png");
+    if thumb.exists() {
+        n += fs::metadata(&thumb).map(|m| m.len()).unwrap_or(0);
+    }
+    n
+}
+
+fn split_byte_label(label: &str) -> (&str, &str) {
+    match label.rsplit_once(' ') {
+        Some((value, unit)) => (value, unit),
+        None => (label, ""),
+    }
+}
+
+fn draw_clips_storage_stats(
+    ui: &mut egui::Ui,
+    visible_count: usize,
+    visible_bytes: u64,
+    library_count: usize,
+    library_bytes: u64,
+    filter_active: bool,
+) {
+    const SOFT_CAP_BYTES: f32 = 50.0 * 1024.0 * 1024.0 * 1024.0;
+    let fill = (visible_bytes as f32 / SOFT_CAP_BYTES).clamp(0.0, 1.0);
+    let stats_width = 160.0;
+    let size_label = format_bytes(visible_bytes);
+    let (value, unit) = split_byte_label(&size_label);
+    let count_label = if visible_count == 1 {
+        "1 clip".to_string()
+    } else {
+        format!("{visible_count} clips")
+    };
+
+    ui.horizontal(|ui| {
+        let sep_height = if filter_active { 44.0 } else { 32.0 };
+        let (sep_rect, _) =
+            ui.allocate_exact_size(egui::vec2(1.0, sep_height), egui::Sense::hover());
+        ui.painter()
+            .rect_filled(sep_rect, 0.0, theme::stroke_subtle());
+        ui.add_space(10.0);
+
+        ui.vertical(|ui| {
+            ui.set_width(stats_width);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(&count_label)
+                        .color(theme::text_muted())
+                        .size(12.0),
+                );
+                ui.label(
+                    egui::RichText::new("·")
+                        .color(theme::text_muted())
+                        .size(12.0),
+                );
+                if !unit.is_empty() {
+                    ui.label(
+                        egui::RichText::new(unit)
+                            .color(theme::accent_bright())
+                            .size(12.0),
+                    );
+                }
+                ui.label(
+                    egui::RichText::new(value)
+                        .color(theme::accent())
+                        .strong()
+                        .size(20.0),
+                );
+            });
+
+            if filter_active {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "of {library_count} · {}",
+                            format_bytes(library_bytes)
+                        ))
+                        .color(theme::text_muted())
+                        .size(11.0),
+                    );
+                });
+            }
+
+            ui.add_space(5.0);
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(stats_width, 3.0), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 1.5, theme::surface_track());
+            if fill > 0.0 {
+                let mut fill_rect = rect;
+                fill_rect.set_width((rect.width() * fill).max(2.0).min(rect.width()));
+                ui.painter().rect_filled(fill_rect, 1.5, theme::accent());
+            }
+        });
+    });
 }

@@ -58,6 +58,9 @@ fi
 if ! command -v ffprobe >/dev/null 2>&1; then
   warn_missing "ffprobe not found (needed for clip metadata). Install ffmpeg."
 fi
+if ! command -v curl >/dev/null 2>&1; then
+  warn_missing "curl not found (needed for cloud Share link uploads). Install curl."
+fi
 
 if command -v gpu-screen-recorder >/dev/null 2>&1; then
   :

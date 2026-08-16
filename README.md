@@ -10,9 +10,10 @@ Start a rolling replay buffer with [GPU Screen Recorder](https://git.dec05eba.co
 - System + microphone audio (all desktop or selected apps)
 - Quality presets (Balanced / High / Ultra CBR)
 - Global save hotkey (portal on Wayland; X11 / evdev fallbacks)
-- Clips library: thumbnails, open, copy path, rename, full-screen trim with filmstrip timeline, draggable playhead, in-app preview playback, delete, sort/filter
+- Clips library: thumbnails, open, copy path, show in folder, share link, rename, full-screen trim with filmstrip timeline, draggable playhead, in-app preview playback, delete, sort/filter
 - Clip save sound + desktop notification (configurable)
-- Settings: display, resolution, FPS, buffer, codec, quality, audio, output, sound, backend
+- Share link via ReplayForge cloud (Cloudflare; ~7 day expiry; needs `curl`)
+- Settings: display, resolution, FPS, buffer, codec, quality, audio, output, sound, sharing, backend
 - System tray (show/hide, save, quit) with sidebar Quit fallback
 - Autostart + minimize-to-tray + optional auto-start replay on launch
 - First-run setup (display, folder, audio, portal hotkey)
@@ -24,6 +25,7 @@ Start a rolling replay buffer with [GPU Screen Recorder](https://git.dec05eba.co
 - Linux (Wayland supported; global hotkeys via desktop portal — see below)
 - [gpu-screen-recorder](https://git.dec05eba.com/gpu-screen-recorder/) **or** Flatpak `com.dec05eba.gpu_screen_recorder`
 - `ffmpeg` / `ffprobe` (thumbnails, trim, trim preview video decode)
+- `curl` (Share link uploads to ReplayForge cloud)
 - Rust toolchain to build from source
 - `alsa-lib-devel` when building from source (trim preview audio / SFX via rodio)
 
@@ -78,6 +80,16 @@ The tray needs a StatusNotifier / AppIndicator host. Some sessions (including Ba
 - Closing the window still **hides** the app when minimize-to-tray is enabled — reopen from the app menu.
 - Use **Quit** in the sidebar to stop the buffer and exit.
 
+### Share link
+
+Click **Share link** on a clip to upload to **ReplayForge cloud** (Cloudflare Worker + R2) and copy a link like `https://replayforge-share.….workers.dev/c/<id>`.
+
+- Max size ~**500 MB**; links expire after ~**7 days**
+- Requires `curl` on PATH
+- Default cloud URL is built in; **Settings → Sharing** can reset, override, or disable
+
+Maintainer / self-host docs: [`share-worker/README.md`](share-worker/README.md).
+
 ## Build / run from source
 
 ```bash
@@ -121,6 +133,7 @@ open_trim_after_save = false
 # clip_sound_path = "/path/to/custom.wav"  # omit for bundled sound
 sfx_volume = 1.0
 clip_ready_notify_critical = true
+# share_api_base = "https://replayforge-share.<you>.workers.dev"  # Settings → Sharing
 first_run_complete = true
 ```
 

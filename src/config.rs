@@ -126,6 +126,9 @@ pub struct Config {
     /// When true, "Clip ready" desktop notifications use critical urgency.
     #[serde(default = "default_true")]
     pub clip_ready_notify_critical: bool,
+    /// Base URL of the share Worker (empty disables Share).
+    #[serde(default = "default_share_api_base")]
+    pub share_api_base: String,
     pub first_run_complete: bool,
 }
 
@@ -139,6 +142,11 @@ fn default_sfx_volume() -> f32 {
 
 fn default_resolution() -> String {
     "native".to_string()
+}
+
+/// Hosted ReplayForge share Worker (Cloudflare). Empty `share_api_base` disables Share.
+pub fn default_share_api_base() -> String {
+    "https://replayforge-share.holdup6699.workers.dev".to_string()
 }
 
 impl Default for Config {
@@ -165,6 +173,7 @@ impl Default for Config {
             clip_sound_path: None,
             sfx_volume: default_sfx_volume(),
             clip_ready_notify_critical: true,
+            share_api_base: default_share_api_base(),
             first_run_complete: false,
         }
     }

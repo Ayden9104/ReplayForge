@@ -6,6 +6,7 @@ mod host;
 mod hotkeys;
 mod recorder;
 mod sfx;
+mod share;
 mod theme;
 mod tray;
 mod trim_playback;
