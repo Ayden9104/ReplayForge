@@ -4,7 +4,7 @@ Medal-style **instant replay** for Linux.
 
 It keeps a short rolling buffer with [GPU Screen Recorder](https://git.dec05eba.com/gpu-screen-recorder/). Hit a hotkey to save the last N seconds, then open, trim, or share clips from a simple desktop app.
 
-Latest release: [v0.1.0](https://github.com/Ayden9104/ReplayForge/releases/tag/v0.1.0)
+Latest release: [v0.1.1](https://github.com/Ayden9104/ReplayForge/releases/tag/v0.1.1)
 
 ## What you get
 
@@ -15,13 +15,43 @@ Latest release: [v0.1.0](https://github.com/Ayden9104/ReplayForge/releases/tag/v
 
 ## Requirements
 
-- Linux (Wayland or X11)
+- Linux x86_64 (Wayland or X11)
 - [gpu-screen-recorder](https://git.dec05eba.com/gpu-screen-recorder/) **or** Flatpak `com.dec05eba.gpu_screen_recorder`
 - `ffmpeg` and `ffprobe`
 - `curl` (for Share links)
-- Rust toolchain (to build)
 
 ## Install
+
+### Download (recommended)
+
+1. Grab `replayforge-0.1.1-linux-x86_64.tar.gz` from the [latest release](https://github.com/Ayden9104/ReplayForge/releases/tag/v0.1.1).
+2. Extract and install:
+
+```bash
+tar -xzf replayforge-0.1.1-linux-x86_64.tar.gz
+cd replayforge-0.1.1-linux-x86_64
+./install.sh
+```
+
+That puts the app in `~/.local/bin` plus a desktop entry and icon. Make sure `~/.local/bin` is on your `PATH`, then launch **ReplayForge**.
+
+```bash
+# custom location
+PREFIX=/opt/replayforge ./install.sh
+
+# remove the app (keeps ~/.config/ReplayForge)
+./install.sh --uninstall
+```
+
+If you already cloned the repo, you can install a downloaded archive with:
+
+```bash
+./scripts/install-bin.sh ~/Downloads/replayforge-0.1.1-linux-x86_64.tar.gz
+```
+
+### Build from source
+
+Needs a Rust toolchain and ALSA headers (`alsa-lib-devel` on Fedora, etc.).
 
 ```bash
 git clone https://github.com/Ayden9104/ReplayForge.git
@@ -29,22 +59,7 @@ cd ReplayForge
 ./scripts/install.sh
 ```
 
-That builds a release binary and installs:
-
-- `~/.local/bin/replayforge`
-- desktop entry + icon under `~/.local/share/`
-
-Make sure `~/.local/bin` is on your `PATH`, then launch **ReplayForge** from the app menu or a terminal.
-
-```bash
-# custom install location
-PREFIX=/opt/replayforge ./scripts/install.sh
-
-# remove the app (keeps ~/.config/ReplayForge)
-./scripts/install.sh --uninstall
-```
-
-If the build fails looking for `alsa` / `alsa.pc`, install ALSA development headers for your distro (e.g. `alsa-lib-devel` on Fedora) and run the install script again. On immutable systems (Bazzite, etc.), building inside a Fedora Distrobox with those headers works well.
+On immutable systems (Bazzite, etc.), building inside a Fedora Distrobox with those headers works well.
 
 ## Quick start
 
@@ -59,7 +74,7 @@ Share uploads to ReplayForge cloud and copies a link. Clips are about **500 MB**
 
 - **Wayland hotkeys / app audio:** run ReplayForge on the **host** session, not only inside a container, so it can talk to the desktop portal.
 - **Tray icon missing:** some desktops need a StatusNotifier / AppIndicator host. Try **Settings → Desktop → Retry tray**, or use **Quit** in the sidebar. Closing the window may only hide the app if minimize-to-tray is on.
-- **Flatpak:** there is an experimental manifest under `packaging/flatpak/`, but the supported install path is still `./scripts/install.sh`.
+- **Flatpak:** there is an experimental manifest under `packaging/flatpak/`, but the supported install path is the release tarball or `./scripts/install.sh`.
 
 ## Config
 
@@ -73,6 +88,8 @@ Default save hotkey is **F8**. While the ReplayForge window is focused, the hotk
 cargo build --release
 cargo run --release
 ```
+
+Package a release tarball: `./scripts/package-release.sh`
 
 Self-hosting the share backend is optional; see [`share-worker/README.md`](share-worker/README.md).
 
