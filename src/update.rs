@@ -61,9 +61,7 @@ pub fn check_latest() -> Result<UpdateInfo, String> {
         .iter()
         .find(|(name, _)| name == "SHA256SUMS")
         .cloned()
-        .ok_or_else(|| {
-            "Update check failed: release missing SHA256SUMS asset".to_string()
-        })?;
+        .ok_or_else(|| "Update check failed: release missing SHA256SUMS asset".to_string())?;
 
     require_https(&tarball_url)?;
     require_https(&sha256sums_url)?;
@@ -147,6 +145,26 @@ pub fn install_update(info: &UpdateInfo) -> Result<(), String> {
         .status();
 
     drop(cleanup);
+    Ok(())
+}
+
+/// Path where in-app updates install the binary (`$HOME/.local/bin/replayforge`).
+pub fn installed_bin_path() -> Result<PathBuf, String> {
+    Ok(dirs_home()?.join(".local/bin/replayforge"))
+}
+
+/// Start a new process from the installed binary (after an update replace).
+pub fn relaunch_installed() -> Result<(), String> {
+    let bin = installed_bin_path()?;
+    if !bin.is_file() {
+        return Err(format!("Installed binary missing: {}", bin.display()));
+    }
+    Command::new(&bin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to relaunch {}: {e}", bin.display()))?;
     Ok(())
 }
 
@@ -245,9 +263,7 @@ fn verify_sha256(dir: &Path, tarball_name: &str) -> Result<(), String> {
                 None
             }
         })
-        .ok_or_else(|| {
-            format!("SHA256SUMS has no entry for {tarball_name}")
-        })?;
+        .ok_or_else(|| format!("SHA256SUMS has no entry for {tarball_name}"))?;
 
     let out = Command::new("sha256sum")
         .arg(tarball_name)
@@ -293,9 +309,7 @@ fn validate_tar_members(tarball: &Path) -> Result<(), String> {
             continue;
         }
         if member.starts_with('/') || member.contains("..") {
-            return Err(format!(
-                "Refusing unsafe archive member: {member}"
-            ));
+            return Err(format!("Refusing unsafe archive member: {member}"));
         }
     }
     Ok(())
@@ -303,7 +317,8 @@ fn validate_tar_members(tarball: &Path) -> Result<(), String> {
 
 fn find_package_dir(extract_dir: &Path) -> Result<PathBuf, String> {
     let mut dirs = Vec::new();
-    for entry in fs::read_dir(extract_dir).map_err(|e| format!("Failed to read extract dir: {e}"))?
+    for entry in
+        fs::read_dir(extract_dir).map_err(|e| format!("Failed to read extract dir: {e}"))?
     {
         let entry = entry.map_err(|e| format!("Failed to read extract entry: {e}"))?;
         let path = entry.path();
@@ -314,10 +329,7 @@ fn find_package_dir(extract_dir: &Path) -> Result<PathBuf, String> {
     if dirs.len() != 1 {
         return Err("Update archive must contain exactly one top-level directory".into());
     }
-    let name = dirs[0]
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let name = dirs[0].file_name().and_then(|n| n.to_str()).unwrap_or("");
     if !(name.starts_with("replayforge-") && name.contains("-linux-")) {
         return Err(format!("Unexpected package directory name: {name}"));
     }
@@ -354,8 +366,7 @@ fn install_file(src: &Path, dst: &Path, executable: bool) -> Result<(), String> 
                     .map_err(|e| format!("Failed to chmod {}: {e}", tmp.display()))?;
             }
         }
-        fs::rename(&tmp, dst)
-            .map_err(|e| format!("Failed to install {}: {e}", dst.display()))?;
+        fs::rename(&tmp, dst).map_err(|e| format!("Failed to install {}: {e}", dst.display()))?;
         Ok(())
     })();
 
@@ -366,8 +377,8 @@ fn install_file(src: &Path, dst: &Path, executable: bool) -> Result<(), String> 
 }
 
 fn rewrite_desktop_exec(desktop: &Path, bin: &Path) -> Result<(), String> {
-    let text = fs::read_to_string(desktop)
-        .map_err(|e| format!("Failed to read desktop file: {e}"))?;
+    let text =
+        fs::read_to_string(desktop).map_err(|e| format!("Failed to read desktop file: {e}"))?;
     let bin_str = bin.to_string_lossy();
     let rewritten = text
         .lines()

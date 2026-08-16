@@ -581,9 +581,16 @@ impl ReplayForge {
                 match result {
                     Ok(latest) => {
                         self.pending_update = None;
-                        self.toast(format!(
-                            "Installed v{latest} — ReplayForge will quit; relaunch to finish"
-                        ));
+                        match update::relaunch_installed() {
+                            Ok(()) => {
+                                self.toast(format!("Installed v{latest} — restarting…"));
+                            }
+                            Err(error) => {
+                                self.toast(format!(
+                                    "Installed v{latest}, but relaunch failed ({error}). Open ReplayForge from the app menu."
+                                ));
+                            }
+                        }
                         self.quit_requested = true;
                     }
                     Err(error) => {
