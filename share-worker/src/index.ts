@@ -34,7 +34,7 @@ export default {
 
       const clipMatch = path.match(/^\/c\/([a-f0-9-]{36})$/);
       if (request.method === "GET" && clipMatch) {
-        return await handleClipGet(clipMatch[1], env);
+        return await handleClipGet(clipMatch[1], request, env);
       }
 
       if (request.method === "GET" && path === "/") {
@@ -106,23 +106,177 @@ async function handleUploadComplete(id: string, env: Env): Promise<Response> {
   });
 }
 
-async function handleClipGet(id: string, env: Env): Promise<Response> {
-  const obj = await env.CLIPS.get(objectKey(id));
-  if (!obj) {
-    return new Response("Clip not found or expired", { status: 404 });
+async function handleClipGet(
+  id: string,
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  if (wantsRaw(request)) {
+    const obj = await env.CLIPS.get(objectKey(id));
+    if (!obj) {
+      return htmlResponse(notFoundHtml(), 404);
+    }
+    const headers = new Headers();
+    obj.writeHttpMetadata(headers);
+    headers.set("Content-Type", "video/mp4");
+    headers.set("Accept-Ranges", "bytes");
+    headers.set("Cache-Control", "public, max-age=3600");
+    headers.set("Access-Control-Allow-Origin", "*");
+    if (obj.size) {
+      headers.set("Content-Length", String(obj.size));
+    }
+    return new Response(obj.body, { status: 200, headers });
   }
 
-  const headers = new Headers();
-  obj.writeHttpMetadata(headers);
-  headers.set("Content-Type", "video/mp4");
-  headers.set("Accept-Ranges", "bytes");
-  headers.set("Cache-Control", "public, max-age=3600");
-  headers.set("Access-Control-Allow-Origin", "*");
-  if (obj.size) {
-    headers.set("Content-Length", String(obj.size));
+  const meta = await env.CLIPS.head(objectKey(id));
+  if (!meta) {
+    return htmlResponse(notFoundHtml(), 404);
   }
+  return htmlResponse(playerHtml(id), 200);
+}
 
-  return new Response(obj.body, { status: 200, headers });
+/** Raw MP4 when ?raw=1, or Accept prefers video without HTML. */
+function wantsRaw(request: Request): boolean {
+  const url = new URL(request.url);
+  if (url.searchParams.get("raw") === "1") {
+    return true;
+  }
+  const accept = (request.headers.get("Accept") || "").toLowerCase();
+  if (!accept || accept.includes("*/*")) {
+    return false;
+  }
+  const wantsHtml = accept.includes("text/html");
+  const wantsVideo = accept.includes("video/");
+  return wantsVideo && !wantsHtml;
+}
+
+function htmlResponse(body: string, status: number): Response {
+  return new Response(body, {
+    status,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "public, max-age=300",
+    },
+  });
+}
+
+function playerHtml(id: string): string {
+  const rawSrc = `/c/${id}?raw=1`;
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ReplayForge — Shared clip</title>
+  <style>
+    :root {
+      --bg: #191919;
+      --accent: #4682dc;
+      --muted: #8c8c8c;
+      --text: #e8e8e8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(ellipse at 50% 0%, #242a38 0%, var(--bg) 55%);
+      color: var(--text);
+      font-family: "Segoe UI", system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 20px 40px;
+    }
+    .brand {
+      font-size: clamp(2rem, 6vw, 3rem);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--accent);
+      margin: 0 0 8px;
+      text-align: center;
+    }
+    .tag {
+      margin: 0 0 32px;
+      color: var(--muted);
+      font-size: 0.95rem;
+      text-align: center;
+    }
+    .stage {
+      width: min(960px, 100%);
+    }
+    video {
+      display: block;
+      width: 100%;
+      max-height: min(70vh, 720px);
+      background: #0a0a0a;
+      border-radius: 8px;
+    }
+    .actions {
+      margin-top: 16px;
+      text-align: center;
+    }
+    .actions a {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 0.95rem;
+    }
+    .actions a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1 class="brand">ReplayForge</h1>
+  <p class="tag">Shared clip · Expires in about 7 days</p>
+  <div class="stage">
+    <video controls playsinline preload="metadata" src="${rawSrc}"></video>
+    <div class="actions">
+      <a href="${rawSrc}" download>Download MP4</a>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+function notFoundHtml(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ReplayForge — Clip not found</title>
+  <style>
+    :root {
+      --bg: #191919;
+      --accent: #4682dc;
+      --muted: #8c8c8c;
+      --text: #e8e8e8;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(ellipse at 50% 0%, #242a38 0%, var(--bg) 55%);
+      color: var(--text);
+      font-family: "Segoe UI", system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 40px 20px;
+      text-align: center;
+    }
+    .brand {
+      font-size: clamp(2rem, 6vw, 3rem);
+      font-weight: 700;
+      color: var(--accent);
+      margin: 0 0 16px;
+    }
+    p { color: var(--muted); margin: 0; max-width: 28rem; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <h1 class="brand">ReplayForge</h1>
+  <p>Clip not found or expired.</p>
+</body>
+</html>`;
 }
 
 async function presignPut(env: Env, key: string): Promise<string> {
