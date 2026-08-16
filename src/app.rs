@@ -394,10 +394,7 @@ impl ReplayForge {
                             .and_then(|n| n.to_str())
                             .unwrap_or("clip")
                             .to_string();
-                        self.toast(format!(
-                            "{} — {name}",
-                            chill_toast(ChillKind::ClipReady)
-                        ));
+                        self.toast(format!("{} — {name}", chill_toast(ChillKind::ClipReady)));
                         notify_desktop_with_urgency(
                             "Clip ready",
                             &format!("{name}\nOpen ReplayForge → Clips to review or trim."),
