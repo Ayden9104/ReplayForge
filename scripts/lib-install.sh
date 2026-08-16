@@ -44,3 +44,16 @@ replayforge_print_path_hint() {
     echo "Or find ReplayForge in your app menu (log out/in if it is missing)."
   fi
 }
+
+# Install an executable via temp + mv so replacing a running binary avoids ETXTBSY.
+replayforge_install_bin() {
+  local src="$1"
+  local dest="$2"
+  local dir tmp
+  dir="$(dirname "$dest")"
+  mkdir -p "$dir"
+  tmp="$dir/.$(basename "$dest").new"
+  rm -f "$tmp"
+  install -m755 "$src" "$tmp"
+  mv -f "$tmp" "$dest"
+}

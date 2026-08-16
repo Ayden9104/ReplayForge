@@ -90,7 +90,7 @@ fi
 
 replayforge_require_overwrite_ok "$BIN"
 
-install -Dm755 "$SRC/replayforge" "$BIN"
+replayforge_install_bin "$SRC/replayforge" "$BIN"
 install -Dm644 "$SRC/replayforge.desktop" "$DESKTOP"
 install -Dm644 "$SRC/replayforge.svg" "$ICON"
 sed -i "s|^Exec=replayforge$|Exec=$BIN|" "$DESKTOP"

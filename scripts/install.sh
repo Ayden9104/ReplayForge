@@ -43,7 +43,7 @@ replayforge_require_overwrite_ok "$BIN"
 echo "Building ReplayForge (release, locked)..."
 cargo build --release --locked --manifest-path "$ROOT/Cargo.toml"
 
-install -Dm755 "$ROOT/target/release/replayforge" "$BIN"
+replayforge_install_bin "$ROOT/target/release/replayforge" "$BIN"
 install -Dm644 "$ROOT/assets/replayforge.desktop" "$DESKTOP"
 install -Dm644 "$ROOT/assets/replayforge.svg" "$ICON"
 

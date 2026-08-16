@@ -326,22 +326,43 @@ fn find_package_dir(extract_dir: &Path) -> Result<PathBuf, String> {
 
 fn install_file(src: &Path, dst: &Path, executable: bool) -> Result<(), String> {
     if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
     }
-    fs::copy(src, dst).map_err(|e| format!("Failed to install {}: {e}", dst.display()))?;
-    if executable {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(dst)
-                .map_err(|e| format!("Failed to stat {}: {e}", dst.display()))?
-                .permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(dst, perms)
-                .map_err(|e| format!("Failed to chmod {}: {e}", dst.display()))?;
+
+    // Write to a sibling temp file then rename over the destination so replacing a
+    // currently-running binary does not hit Linux ETXTBSY ("Text file busy").
+    let tmp = dst.with_file_name(format!(
+        ".{}.new",
+        dst.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("replayforge")
+    ));
+    let _ = fs::remove_file(&tmp);
+
+    let copy_result = (|| -> Result<(), String> {
+        fs::copy(src, &tmp).map_err(|e| format!("Failed to stage {}: {e}", tmp.display()))?;
+        if executable {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&tmp)
+                    .map_err(|e| format!("Failed to stat {}: {e}", tmp.display()))?
+                    .permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&tmp, perms)
+                    .map_err(|e| format!("Failed to chmod {}: {e}", tmp.display()))?;
+            }
         }
+        fs::rename(&tmp, dst)
+            .map_err(|e| format!("Failed to install {}: {e}", dst.display()))?;
+        Ok(())
+    })();
+
+    if copy_result.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
-    Ok(())
+    copy_result
 }
 
 fn rewrite_desktop_exec(desktop: &Path, bin: &Path) -> Result<(), String> {
