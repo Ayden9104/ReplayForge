@@ -395,14 +395,7 @@ impl Recorder {
 
 fn signal_gsr(signal: &str) -> bool {
     // Prefer the anchored pattern used by GSR's own scripts.
-    let status = host_command("pkill", &[signal, "-f", "^gpu-screen-recorder"])
-        .status()
-        .ok();
-    if status.is_some_and(|s| s.success()) {
-        return true;
-    }
-
-    host_command("pkill", &[signal, "-f", "gpu-screen-recorder"])
+    host_command("pkill", &[signal, "-f", "^gpu-screen-recorder"])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)

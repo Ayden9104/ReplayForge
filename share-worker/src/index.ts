@@ -61,11 +61,12 @@ async function handleUploadInit(request: Request, env: Env): Promise<Response> {
     return json({ error: "forbidden: ReplayForge User-Agent required" }, 403);
   }
 
-  if (!(await allowRate(request, "init"))) {
+  if (!(await allowRate(request, "init", 5))) {
     return json({ error: "rate limited — try again shortly" }, 429);
   }
 
   requireSecrets(env);
+  requireHttpsPublicBase(env);
 
   let body: { size?: number; filename?: string } = {};
   try {
@@ -99,13 +100,29 @@ async function handleUploadComplete(
   request: Request,
   env: Env,
 ): Promise<Response> {
-  if (!(await allowRate(request, "complete"))) {
+  // UA prefix is a casual filter only — not real authentication.
+  const ua = request.headers.get("User-Agent") || "";
+  if (!ua.startsWith(UA_PREFIX)) {
+    return json({ error: "forbidden: ReplayForge User-Agent required" }, 403);
+  }
+
+  if (!(await allowRate(request, "complete", 5))) {
     return json({ error: "rate limited — try again shortly" }, 429);
   }
 
-  const obj = await env.CLIPS.head(objectKey(id));
+  requireHttpsPublicBase(env);
+
+  const key = objectKey(id);
+  const obj = await env.CLIPS.head(key);
   if (!obj) {
     return json({ error: "upload not found — PUT may have failed" }, 404);
+  }
+  if (obj.size > MAX_BYTES) {
+    await env.CLIPS.delete(key);
+    return json(
+      { error: `file too large; max is ${MAX_BYTES} bytes (~500 MB)` },
+      413,
+    );
   }
   return json({
     ok: true,
@@ -120,6 +137,10 @@ async function handleClipGet(
   request: Request,
   env: Env,
 ): Promise<Response> {
+  if (!(await allowRate(request, "get", 60))) {
+    return json({ error: "rate limited — try again shortly" }, 429);
+  }
+
   if (wantsRaw(request)) {
     const obj = await env.CLIPS.get(objectKey(id));
     if (!obj) {
@@ -431,10 +452,18 @@ function requireSecrets(env: Env): void {
   }
 }
 
-/** Soft per-IP rate limit via Cache API (~5 actions / minute per bucket). */
+function requireHttpsPublicBase(env: Env): void {
+  const base = (env.PUBLIC_BASE_URL || "").trim();
+  if (!base.startsWith("https://")) {
+    throw new Error("share service misconfigured");
+  }
+}
+
+/** Soft per-IP rate limit via Cache API. */
 async function allowRate(
   request: Request,
-  bucket: "init" | "complete",
+  bucket: "init" | "complete" | "get",
+  limit: number,
 ): Promise<boolean> {
   const ip =
     request.headers.get("CF-Connecting-IP") ||
@@ -447,7 +476,7 @@ async function allowRate(
   const cache = caches.default;
   const existing = await cache.match(cacheKey);
   const count = existing ? Number(await existing.text()) : 0;
-  if (count >= 5) {
+  if (count >= limit) {
     return false;
   }
   await cache.put(

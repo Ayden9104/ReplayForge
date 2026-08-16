@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=/dev/null
+source "$ROOT/scripts/lib-install.sh"
+
 PREFIX="${PREFIX:-$HOME/.local}"
 
 BIN="$PREFIX/bin/replayforge"
@@ -20,15 +23,22 @@ uninstall() {
   echo "Removed binary, desktop entry, and icon (config at ~/.config/ReplayForge is kept)."
 }
 
+replayforge_parse_force "$@"
+set -- "${REPLAYFORGE_ARGS[@]+"${REPLAYFORGE_ARGS[@]}"}"
+
 if [[ "${1:-}" == "--uninstall" ]]; then
   uninstall
   exit 0
 fi
 
+replayforge_require_safe_prefix
+
 if ! command -v cargo >/dev/null 2>&1; then
   echo "error: cargo not found. Install a Rust toolchain (https://rustup.rs/) first." >&2
   exit 1
 fi
+
+replayforge_require_overwrite_ok "$BIN"
 
 echo "Building ReplayForge (release, locked)..."
 cargo build --release --locked --manifest-path "$ROOT/Cargo.toml"
@@ -75,15 +85,7 @@ echo "Installed ReplayForge to $PREFIX"
 echo "  Binary:  $BIN"
 echo "  Desktop: $DESKTOP"
 echo
-if [[ ":$PATH:" != *":$PREFIX/bin:"* ]]; then
-  echo "Note: $PREFIX/bin is not on your PATH."
-  echo "  Add this to ~/.bashrc (or equivalent), then open a new terminal:"
-  echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
-  echo "  Or launch from your app menu after logging out/in."
-else
-  echo "Launch with: replayforge"
-  echo "Or find ReplayForge in your app menu (log out/in if it is missing)."
-fi
+replayforge_print_path_hint "$PREFIX/bin"
 echo
 echo "Post-install:"
 echo "  1. Open ReplayForge and finish first-run (display + clips folder)."
@@ -91,4 +93,5 @@ echo "  2. Settings → Enable global hotkey (portal) for in-game F8 on Wayland.
 echo "  3. Run on the host desktop session (not only inside Toolbox) for portal + audio."
 echo
 echo "Custom prefix: PREFIX=/opt/replayforge ./scripts/install.sh"
+echo "Overwrite:     ./scripts/install.sh --force"
 echo "Uninstall:     ./scripts/install.sh --uninstall"

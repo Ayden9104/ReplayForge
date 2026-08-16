@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=/dev/null
+source "$ROOT/scripts/lib-install.sh"
+
 PREFIX="${PREFIX:-$HOME/.local}"
 
 BIN="$PREFIX/bin/replayforge"
@@ -19,17 +23,22 @@ uninstall() {
   echo "Removed binary, desktop entry, and icon (config at ~/.config/ReplayForge is kept)."
 }
 
+replayforge_parse_force "$@"
+set -- "${REPLAYFORGE_ARGS[@]+"${REPLAYFORGE_ARGS[@]}"}"
+
 if [[ "${1:-}" == "--uninstall" ]]; then
   uninstall
   exit 0
 fi
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <replayforge-*-linux-x86_64.tar.gz|extracted-dir>" >&2
+  echo "Usage: $0 [--force] <replayforge-*-linux-x86_64.tar.gz|extracted-dir>" >&2
   echo "       $0 --uninstall" >&2
   echo "PREFIX=$PREFIX (override with PREFIX=...)" >&2
   exit 1
 fi
+
+replayforge_require_safe_prefix
 
 SRC="$1"
 TMP=""
@@ -41,13 +50,28 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ -f "$SRC" && "$SRC" == *.tar.gz ]]; then
+  # Reject unsafe archive members before extract.
+  while IFS= read -r member; do
+    [[ -z "$member" ]] && continue
+    if [[ "$member" == /* || "$member" == *..* ]]; then
+      echo "error: refusing archive member with absolute path or '..': $member" >&2
+      exit 1
+    fi
+  done < <(tar -tzf "$SRC")
+
   TMP="$(mktemp -d)"
   tar --no-same-owner -xzf "$SRC" -C "$TMP"
-  SRC="$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -1)"
-  if [[ -z "$SRC" ]]; then
-    echo "error: archive did not contain a package directory" >&2
+
+  mapfile -t tops < <(find "$TMP" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+  if [[ "${#tops[@]}" -ne 1 ]]; then
+    echo "error: archive must contain exactly one top-level directory" >&2
     exit 1
   fi
+  if [[ ! "${tops[0]}" =~ ^replayforge-.*-linux- ]]; then
+    echo "error: unexpected package directory name: ${tops[0]}" >&2
+    exit 1
+  fi
+  SRC="$TMP/${tops[0]}"
 elif [[ -d "$SRC" ]]; then
   :
 else
@@ -55,14 +79,16 @@ else
   exit 1
 fi
 
-if [[ ! -f "$SRC/replayforge" ]]; then
-  echo "error: missing binary at $SRC/replayforge" >&2
+if [[ ! -f "$SRC/replayforge" || -L "$SRC/replayforge" ]]; then
+  echo "error: missing regular-file binary at $SRC/replayforge" >&2
   exit 1
 fi
 if [[ ! -f "$SRC/replayforge.desktop" || ! -f "$SRC/replayforge.svg" ]]; then
   echo "error: package is missing desktop entry or icon" >&2
   exit 1
 fi
+
+replayforge_require_overwrite_ok "$BIN"
 
 install -Dm755 "$SRC/replayforge" "$BIN"
 install -Dm644 "$SRC/replayforge.desktop" "$DESKTOP"
@@ -103,14 +129,6 @@ echo "Installed ReplayForge to $PREFIX"
 echo "  Binary:  $BIN"
 echo "  Desktop: $DESKTOP"
 echo
-if [[ ":$PATH:" != *":$PREFIX/bin:"* ]]; then
-  echo "Note: $PREFIX/bin is not on your PATH."
-  echo "  Add this to ~/.bashrc (or equivalent), then open a new terminal:"
-  echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
-  echo "  Or launch from your app menu after logging out/in."
-else
-  echo "Launch with: replayforge"
-  echo "Or find ReplayForge in your app menu (log out/in if it is missing)."
-fi
+replayforge_print_path_hint "$PREFIX/bin"
 echo
 echo "Uninstall: $0 --uninstall"

@@ -65,6 +65,7 @@ pub fn check_latest() -> Result<UpdateInfo, String> {
     let latest = tag.trim().trim_start_matches('v').to_string();
     let html_url = json_string_field(body, "html_url")
         .unwrap_or_else(|| format!("https://github.com/{REPO}/releases/tag/{}", tag.trim()));
+    let html_url = sanitize_release_html_url(&html_url, tag.trim())?;
 
     let current = current_version();
     let newer = is_newer(&latest, current)?;
@@ -74,6 +75,16 @@ pub fn check_latest() -> Result<UpdateInfo, String> {
         html_url,
         newer,
     })
+}
+
+fn sanitize_release_html_url(url: &str, tag: &str) -> Result<String, String> {
+    let prefix = format!("https://github.com/{REPO}/");
+    let url = url.trim();
+    if url.starts_with(&prefix) {
+        return Ok(url.to_string());
+    }
+    // Fall back to a known-good release page rather than opening a hostile URL.
+    Ok(format!("https://github.com/{REPO}/releases/tag/{tag}"))
 }
 
 fn split_http_code(raw: &str) -> (&str, &str) {

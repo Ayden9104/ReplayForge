@@ -11,7 +11,7 @@ pub fn upload_share_link(path: &Path, share_api_base: &str) -> Result<String, St
     if base.is_empty() {
         return Err("Share is disabled — enable ReplayForge cloud in Settings → Sharing".into());
     }
-    if !(base.starts_with("https://") || base.starts_with("http://")) {
+    if !base.starts_with("https://") {
         return Err("Share API base must start with https://".into());
     }
     if !path.is_file() {
@@ -60,13 +60,18 @@ pub fn upload_share_link(path: &Path, share_api_base: &str) -> Result<String, St
             summarize_body(&init_text)
         )
     })?;
+    if !upload_url.starts_with("https://") {
+        return Err("Share init returned a non-https uploadUrl".into());
+    }
     let share_url = json_string_field(&init_text, "shareUrl").ok_or_else(|| {
         format!(
             "Share init missing shareUrl: {}",
             summarize_body(&init_text)
         )
     })?;
-
+    if !share_url.starts_with("https://") {
+        return Err("Share init returned a non-https shareUrl".into());
+    }
     let put_out = run_curl(&[
         "-sS",
         "--max-time",

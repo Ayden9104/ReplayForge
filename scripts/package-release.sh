@@ -38,6 +38,7 @@ install -Dm644 "$ROOT/assets/replayforge.desktop" "$STAGE/replayforge.desktop"
 install -Dm644 "$ROOT/assets/replayforge.svg" "$STAGE/replayforge.svg"
 # Standalone installer for people who only download the tarball.
 install -Dm755 "$ROOT/scripts/install-from-dir.sh" "$STAGE/install.sh"
+install -Dm644 "$ROOT/scripts/lib-install.sh" "$STAGE/lib-install.sh"
 
 cat >"$STAGE/README-runtime.txt" <<EOF
 ReplayForge ${VERSION} (${ARCH})
@@ -51,6 +52,10 @@ Install:
   tar -xzf ${NAME}.tar.gz
   cd ${NAME}
   ./install.sh
+  # overwrite existing install: ./install.sh --force
+
+Verify (optional):
+  sha256sum -c SHA256SUMS
 
 Or from a clone of the repo:
   ./scripts/install-bin.sh /path/to/${NAME}.tar.gz
@@ -61,5 +66,11 @@ EOF
 mkdir -p "$ROOT/dist"
 tar -C "$ROOT/dist" -czf "$OUT" "$NAME"
 
+(
+  cd "$ROOT/dist"
+  sha256sum "$(basename "$OUT")" > SHA256SUMS
+)
+
 echo "Wrote $OUT"
-ls -lh "$OUT"
+echo "Wrote $ROOT/dist/SHA256SUMS"
+ls -lh "$OUT" "$ROOT/dist/SHA256SUMS"

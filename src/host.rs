@@ -47,6 +47,11 @@ pub fn open_path(path: &Path) {
 }
 
 pub fn open_url(url: &str) {
+    let url = url.trim();
+    if !url.starts_with("https://") {
+        eprintln!("Refusing to open non-https URL: {url}");
+        return;
+    }
     if let Err(error) = host_command("xdg-open", &[url]).spawn() {
         eprintln!("Failed to open URL {url}: {error}");
     }
@@ -79,6 +84,7 @@ pub fn notify_desktop_with_urgency(summary: &str, body: &str, urgency: &str, exp
             urgency,
             "-t",
             &expire,
+            "--",
             summary,
             body,
         ],

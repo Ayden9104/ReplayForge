@@ -3,6 +3,18 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# When shipped in a release tarball, helpers live next to this script; from the repo they live in scripts/.
+if [[ -f "$HERE/lib-install.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$HERE/lib-install.sh"
+elif [[ -f "$HERE/../scripts/lib-install.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$HERE/../scripts/lib-install.sh"
+else
+  echo "error: missing lib-install.sh" >&2
+  exit 1
+fi
+
 PREFIX="${PREFIX:-$HOME/.local}"
 
 BIN="$PREFIX/bin/replayforge"
@@ -21,15 +33,22 @@ uninstall() {
   echo "Removed binary, desktop entry, and icon (config at ~/.config/ReplayForge is kept)."
 }
 
+replayforge_parse_force "$@"
+set -- "${REPLAYFORGE_ARGS[@]+"${REPLAYFORGE_ARGS[@]}"}"
+
 if [[ "${1:-}" == "--uninstall" ]]; then
   uninstall
   exit 0
 fi
 
-if [[ ! -f "$HERE/replayforge" ]]; then
-  echo "error: run this from the extracted ReplayForge package directory" >&2
+replayforge_require_safe_prefix
+
+if [[ ! -f "$HERE/replayforge" || -L "$HERE/replayforge" ]]; then
+  echo "error: run this from the extracted ReplayForge package directory (regular binary required)" >&2
   exit 1
 fi
+
+replayforge_require_overwrite_ok "$BIN"
 
 install -Dm755 "$HERE/replayforge" "$BIN"
 install -Dm644 "$HERE/replayforge.desktop" "$DESKTOP"
@@ -70,12 +89,6 @@ echo "Installed ReplayForge to $PREFIX"
 echo "  Binary:  $BIN"
 echo "  Desktop: $DESKTOP"
 echo
-if [[ ":$PATH:" != *":$PREFIX/bin:"* ]]; then
-  echo "Note: $PREFIX/bin is not on your PATH."
-  echo "  Add this to ~/.bashrc (or equivalent), then open a new terminal:"
-  echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
-else
-  echo "Launch with: replayforge"
-fi
+replayforge_print_path_hint "$PREFIX/bin"
 echo
 echo "Uninstall: $0 --uninstall"

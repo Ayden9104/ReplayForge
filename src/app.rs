@@ -2137,21 +2137,25 @@ impl ReplayForge {
         if let Some((old_path, new_stem)) = finish_rename {
             let new_stem = new_stem.trim();
             if !new_stem.is_empty() {
-                let new_path = old_path.with_file_name(format!("{new_stem}.mp4"));
-                let old_thumb = old_path.with_extension("png");
-                let new_thumb = new_path.with_extension("png");
-                match fs::rename(&old_path, &new_path) {
-                    Ok(()) => {
-                        if old_thumb.exists() {
-                            let _ = fs::rename(&old_thumb, &new_thumb);
+                if !is_safe_clip_stem(new_stem) {
+                    self.toast("Invalid name (no path separators or ..)");
+                } else {
+                    let new_path = old_path.with_file_name(format!("{new_stem}.mp4"));
+                    let old_thumb = old_path.with_extension("png");
+                    let new_thumb = new_path.with_extension("png");
+                    match fs::rename(&old_path, &new_path) {
+                        Ok(()) => {
+                            if old_thumb.exists() {
+                                let _ = fs::rename(&old_thumb, &new_thumb);
+                            }
+                            if self.clip_focus.as_ref() == Some(&old_path) {
+                                self.clip_focus = Some(new_path);
+                            }
+                            self.clear_clip_caches();
+                            self.toast("Clip renamed");
                         }
-                        if self.clip_focus.as_ref() == Some(&old_path) {
-                            self.clip_focus = Some(new_path);
-                        }
-                        self.clear_clip_caches();
-                        self.toast("Clip renamed");
+                        Err(error) => self.toast(format!("Rename failed: {error}")),
                     }
-                    Err(error) => self.toast(format!("Rename failed: {error}")),
                 }
             }
             self.rename = None;
@@ -3131,6 +3135,15 @@ enum ChillKind {
     Share,
     Delete,
     Trim,
+}
+
+fn is_safe_clip_stem(stem: &str) -> bool {
+    if stem.is_empty() || stem == "." || stem == ".." || stem.contains("..") {
+        return false;
+    }
+    !stem
+        .chars()
+        .any(|c| c == '/' || c == '\\' || c == '\0' || c.is_control())
 }
 
 fn chill_toast(kind: ChillKind) -> &'static str {

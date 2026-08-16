@@ -7,6 +7,16 @@ use std::process::Stdio;
 
 const MIN_TRIM_SECS: f64 = 0.5;
 
+/// Path string safe to pass as an ffmpeg argv (never looks like a flag).
+fn argv_path(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if s.starts_with('-') {
+        format!("./{s}")
+    } else {
+        s.into_owned()
+    }
+}
+
 /// Extract a single frame as PNG bytes at `time_secs` (for trim preview).
 pub fn extract_frame_png(path: &Path, time_secs: f64) -> Result<Vec<u8>, String> {
     let path_buf = path.to_path_buf();
@@ -17,7 +27,7 @@ pub fn extract_frame_png(path: &Path, time_secs: f64) -> Result<Vec<u8>, String>
         0.0
     };
     let time = format!("{clamped:.3}");
-    let input = path.to_string_lossy();
+    let input = argv_path(path);
 
     let mut child = host_command(
         "ffmpeg",
@@ -77,7 +87,7 @@ pub fn extract_filmstrip_jpeg(
     let vf = format!(
         "fps=1/{interval_str},scale=80:45:force_original_aspect_ratio=decrease,pad=80:45:(ow-iw)/2:(oh-ih)/2,tile={tile}"
     );
-    let input = path.to_string_lossy();
+    let input = argv_path(path);
 
     let mut child = host_command(
         "ffmpeg",
@@ -133,7 +143,7 @@ pub fn extract_waveform_peaks(
     peak_count: usize,
 ) -> Result<Vec<f32>, String> {
     let peak_count = peak_count.max(1);
-    let input = path.to_string_lossy();
+    let input = argv_path(path);
     // Cap decode length to avoid huge buffers on very long clips.
     let decode_secs = duration_secs.clamp(0.1, 600.0);
     let duration = format!("{decode_secs:.3}");
@@ -228,8 +238,8 @@ pub fn extract_waveform_peaks(
 /// Generate a sidecar `.png` thumbnail for a clip (first frame).
 pub fn generate_clip_thumbnail(path: &Path) -> Result<(), String> {
     let thumbnail = path.with_extension("png");
-    let input = path.to_string_lossy();
-    let output = thumbnail.to_string_lossy();
+    let input = argv_path(path);
+    let output = argv_path(&thumbnail);
 
     let status = host_command(
         "ffmpeg",
@@ -295,8 +305,8 @@ pub fn trim_clip(path: &Path, start_secs: f64, end_secs: f64) -> Result<(), Stri
         let _ = fs::remove_file(&temp);
     }
 
-    let input = path.to_string_lossy();
-    let temp_str = temp.to_string_lossy();
+    let input = argv_path(path);
+    let temp_str = argv_path(&temp);
     let start = format!("{start_secs:.3}");
     let end = format!("{end_secs:.3}");
 
