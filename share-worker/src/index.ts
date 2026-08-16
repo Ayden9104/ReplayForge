@@ -200,6 +200,10 @@ function sharedPageCss(): string {
       gap: 12px;
       margin: 0 0 6px;
     }
+    .brand-bar.egg {
+      cursor: pointer;
+      user-select: none;
+    }
     .mark {
       width: 36px;
       height: 36px;
@@ -220,6 +224,15 @@ function sharedPageCss(): string {
       text-align: center;
       font-weight: 500;
     }
+    body.joe {
+      background:
+        radial-gradient(ellipse 100% 70% at 50% -5%, #1a3a44 0%, transparent 65%),
+        radial-gradient(ellipse 80% 40% at 80% 100%, #3a3428 0%, transparent 55%),
+        var(--bg);
+    }
+    body.joe .brand { color: #5ecfb8; }
+    body.joe .btn { background: #2eccb0; color: #102018; }
+    body.joe .btn:hover { background: #4ad9c0; }
     .stage {
       width: min(1100px, 100%);
       animation: rise 280ms ease-out both;
@@ -286,17 +299,38 @@ function playerHtml(id: string): string {
   <style>${sharedPageCss()}</style>
 </head>
 <body>
-  <div class="brand-bar">
+  <div class="brand-bar egg" id="brand-egg" title="…">
     ${brandMarkSvg()}
     <h1 class="brand">ReplayForge</h1>
   </div>
-  <p class="tag">Shared clip · Expires in about 7 days</p>
+  <p class="tag" id="tagline">Shared clip · Expires in about 7 days</p>
   <div class="stage">
     <video controls playsinline preload="metadata" src="${rawSrc}"></video>
     <div class="actions">
-      <a class="btn" href="${rawSrc}" download>Download MP4</a>
+      <a class="btn" id="dl-btn" href="${rawSrc}" download>Download MP4</a>
     </div>
   </div>
+  <script>
+    (function () {
+      var clicks = 0;
+      var joe = false;
+      var brand = document.getElementById("brand-egg");
+      var tag = document.getElementById("tagline");
+      var btn = document.getElementById("dl-btn");
+      var normalTag = "Shared clip · Expires in about 7 days";
+      var joeTag = "Chicken Joe says it's all good, brah";
+      if (!brand || !tag || !btn) return;
+      brand.addEventListener("click", function () {
+        clicks += 1;
+        if (clicks < 7) return;
+        clicks = 0;
+        joe = !joe;
+        document.body.classList.toggle("joe", joe);
+        tag.textContent = joe ? joeTag : normalTag;
+        btn.textContent = joe ? "Gnarly MP4" : "Download MP4";
+      });
+    })();
+  </script>
 </body>
 </html>`;
 }

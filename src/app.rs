@@ -395,7 +395,8 @@ impl ReplayForge {
                             .unwrap_or("clip")
                             .to_string();
                         self.toast(format!(
-                            "Clip ready — {name}. Review it in Clips or press Trim."
+                            "{} — {name}",
+                            chill_toast(ChillKind::ClipReady)
                         ));
                         notify_desktop_with_urgency(
                             "Clip ready",
@@ -468,7 +469,7 @@ impl ReplayForge {
                     Ok(url) => {
                         let note = share::share_link_note(&url);
                         ctx.copy_text(url.clone());
-                        self.toast(format!("Link copied — {note}"));
+                        self.toast(format!("{} — {note}", chill_toast(ChillKind::Share)));
                         notify_desktop("Share link ready", &format!("{note}\n{url}"));
                     }
                     Err(error) => self.toast(error),
@@ -1152,7 +1153,7 @@ impl ReplayForge {
                             .and_then(|n| n.to_str())
                             .unwrap_or("clip")
                             .to_string();
-                        self.toast(format!("Trimmed {name}"));
+                        self.toast(format!("{} — {name}", chill_toast(ChillKind::Trim)));
                         notify_desktop("Clip trimmed", &name);
                         self.trim = None;
                         self.clear_trim_previews();
@@ -2111,7 +2112,7 @@ impl ReplayForge {
                     self.clip_focus = None;
                 }
                 self.clear_clip_caches();
-                self.toast("Clip deleted");
+                self.toast(chill_toast(ChillKind::Delete));
             }
         }
     }
@@ -3036,6 +3037,48 @@ impl ReplayForge {
             self.apply_trim();
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum ChillKind {
+    ClipReady,
+    Share,
+    Delete,
+    Trim,
+}
+
+fn chill_toast(kind: ChillKind) -> &'static str {
+    let lines: &[&str] = match kind {
+        ChillKind::ClipReady => &[
+            "Caught that wave",
+            "Highlight secured, dude",
+            "Clip's in the barrel",
+            "Nice ride — it's saved",
+        ],
+        ChillKind::Share => &[
+            "Link's out in the water",
+            "Shared. Go with the flow",
+            "Link copied — hang ten",
+            "It's all good — link's ready",
+        ],
+        ChillKind::Delete => &[
+            "Gone with the tide",
+            "Wiped clean, brah",
+            "That clip paddled out",
+            "Deleted. Still chill",
+        ],
+        ChillKind::Trim => &[
+            "Edited. Still gnarly",
+            "Trimmed — keep the best section",
+            "Cut clean. Cowabunga",
+            "Shaped that wave",
+        ],
+    };
+    let seed = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as usize)
+        .unwrap_or(0);
+    lines[seed % lines.len()]
 }
 
 fn clip_storage_bytes(mp4: &Path) -> u64 {
