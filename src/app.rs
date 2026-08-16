@@ -18,6 +18,7 @@ use crate::hotkeys::HotkeyService;
 use crate::recorder::Recorder;
 use crate::sfx;
 use crate::share;
+use crate::share_links::ShareLinkStore;
 use crate::theme;
 use crate::tray::{TrayCommand, TrayHandle};
 use crate::trim_playback::TrimPlayback;
@@ -95,6 +96,9 @@ pub struct ReplayForge {
     save_rx: Option<Receiver<Result<PathBuf, String>>>,
     sharing: bool,
     share_rx: Option<Receiver<Result<String, String>>>,
+    /// Clip path for the in-flight share upload (for persisting the URL).
+    pending_share_path: Option<PathBuf>,
+    share_links: ShareLinkStore,
     checking_update: bool,
     update_rx: Option<Receiver<Result<UpdateInfo, String>>>,
     pending_update: Option<UpdateInfo>,
@@ -200,6 +204,8 @@ impl ReplayForge {
             save_rx: None,
             sharing: false,
             share_rx: None,
+            pending_share_path: None,
+            share_links: ShareLinkStore::load(),
             checking_update: false,
             update_rx: None,
             pending_update: None,
@@ -439,7 +445,30 @@ impl ReplayForge {
         }
     }
 
-    fn share_link_action(&mut self, path: PathBuf) {
+    fn create_share_link_action(&mut self, path: PathBuf) {
+        if self.share_links.has_live(&path) {
+            return;
+        }
+        self.start_share_upload(path);
+    }
+
+    fn copy_share_link_action(&mut self, ctx: &egui::Context, path: PathBuf) {
+        match self.share_links.take_live_or_clear_stale(&path) {
+            Some(url) => {
+                ctx.copy_text(url);
+                self.toast("Link copied");
+            }
+            None => {
+                self.toast("Link expired — create a new one");
+            }
+        }
+    }
+
+    fn new_share_link_action(&mut self, path: PathBuf) {
+        self.start_share_upload(path);
+    }
+
+    fn start_share_upload(&mut self, path: PathBuf) {
         if self.sharing {
             self.toast("Share already in progress…");
             return;
@@ -456,6 +485,7 @@ impl ReplayForge {
         }
 
         self.sharing = true;
+        self.pending_share_path = Some(path.clone());
         self.toast("Uploading share link…");
         let (tx, rx) = mpsc::channel();
         self.share_rx = Some(rx);
@@ -475,8 +505,12 @@ impl ReplayForge {
             Ok(result) => {
                 self.share_rx = None;
                 self.sharing = false;
+                let pending_path = self.pending_share_path.take();
                 match result {
                     Ok(url) => {
+                        if let Some(path) = pending_path {
+                            self.share_links.put(&path, url.clone());
+                        }
                         let note = share::share_link_note(&url);
                         ctx.copy_text(url.clone());
                         self.toast(format!("{} — {note}", chill_toast(ChillKind::Share)));
@@ -489,6 +523,7 @@ impl ReplayForge {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.share_rx = None;
                 self.sharing = false;
+                self.pending_share_path = None;
                 self.toast("Share failed: worker disconnected");
             }
         }
@@ -1959,7 +1994,9 @@ impl ReplayForge {
         let mut open_path_req: Option<PathBuf> = None;
         let mut copy_path_req: Option<PathBuf> = None;
         let mut reveal_req: Option<PathBuf> = None;
-        let mut share_link_req: Option<PathBuf> = None;
+        let mut share_create_req: Option<PathBuf> = None;
+        let mut share_copy_req: Option<PathBuf> = None;
+        let mut share_new_req: Option<PathBuf> = None;
         let mut start_trim_req: Option<PathBuf> = None;
         let mut delete_req: Option<(PathBuf, PathBuf)> = None;
         let mut start_rename: Option<PathBuf> = None;
@@ -2134,13 +2171,42 @@ impl ReplayForge {
                                         {
                                             reveal_req = Some(clip_path.clone());
                                         }
-                                        if ui
+                                        if self.share_links.has_live(clip_path) {
+                                            if ui
+                                                .add_enabled(
+                                                    !self.sharing,
+                                                    theme::secondary_button("Copy link"),
+                                                )
+                                                .on_hover_text(
+                                                    "Copy the existing cloud link (no re-upload)",
+                                                )
+                                                .clicked()
+                                            {
+                                                share_copy_req = Some(clip_path.clone());
+                                            }
+                                            if ui
+                                                .add_enabled(
+                                                    !self.sharing,
+                                                    theme::secondary_button(if self.sharing {
+                                                        "Sharing…"
+                                                    } else {
+                                                        "New link"
+                                                    }),
+                                                )
+                                                .on_hover_text(
+                                                    "Upload again and replace the saved link",
+                                                )
+                                                .clicked()
+                                            {
+                                                share_new_req = Some(clip_path.clone());
+                                            }
+                                        } else if ui
                                             .add_enabled(
                                                 !self.sharing,
                                                 theme::secondary_button(if self.sharing {
                                                     "Sharing…"
                                                 } else {
-                                                    "Share link"
+                                                    "Create link"
                                                 }),
                                             )
                                             .on_hover_text(
@@ -2148,7 +2214,7 @@ impl ReplayForge {
                                             )
                                             .clicked()
                                         {
-                                            share_link_req = Some(clip_path.clone());
+                                            share_create_req = Some(clip_path.clone());
                                         }
                                         if ui.add(theme::secondary_button("Rename")).clicked() {
                                             start_rename = Some(clip_path.clone());
@@ -2197,8 +2263,14 @@ impl ReplayForge {
             reveal_in_file_manager(&path);
         }
 
-        if let Some(path) = share_link_req {
-            self.share_link_action(path);
+        if let Some(path) = share_create_req {
+            self.create_share_link_action(path);
+        }
+        if let Some(path) = share_copy_req {
+            self.copy_share_link_action(ui.ctx(), path);
+        }
+        if let Some(path) = share_new_req {
+            self.new_share_link_action(path);
         }
 
         if let Some(path) = start_trim_req {
@@ -2232,6 +2304,7 @@ impl ReplayForge {
                             if old_thumb.exists() {
                                 let _ = fs::rename(&old_thumb, &new_thumb);
                             }
+                            self.share_links.rename_path(&old_path, &new_path);
                             if self.clip_focus.as_ref() == Some(&old_path) {
                                 self.clip_focus = Some(new_path);
                             }
@@ -2249,6 +2322,7 @@ impl ReplayForge {
             if let Err(error) = fs::remove_file(&clip_path) {
                 self.toast(format!("Failed to delete clip: {error}"));
             } else {
+                self.share_links.remove(&clip_path);
                 if thumbnail_path.exists() {
                     let _ = fs::remove_file(&thumbnail_path);
                 }
@@ -2891,8 +2965,9 @@ impl ReplayForge {
                 });
                 ui.label(
                     egui::RichText::new(
-                        "Share link uploads clips to ReplayForge cloud (max ~500 MB; \
-                         links expire after ~7 days). Requires curl on PATH.",
+                        "Create link uploads a clip once to ReplayForge cloud (max ~500 MB). \
+                         Copy link reuses that URL until it expires (~7 days). New link uploads again. \
+                         Requires curl on PATH.",
                     )
                     .color(theme::text_muted())
                     .size(12.0),
