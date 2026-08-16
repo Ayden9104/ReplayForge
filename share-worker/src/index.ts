@@ -29,7 +29,7 @@ export default {
 
       const completeMatch = path.match(/^\/v1\/upload\/([a-f0-9-]{36})\/complete$/);
       if (request.method === "POST" && completeMatch) {
-        return cors(await handleUploadComplete(completeMatch[1], env));
+        return cors(await handleUploadComplete(completeMatch[1], request, env));
       }
 
       const clipMatch = path.match(/^\/c\/([a-f0-9-]{36})$/);
@@ -55,12 +55,13 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 async function handleUploadInit(request: Request, env: Env): Promise<Response> {
+  // UA prefix is a casual filter only — not real authentication.
   const ua = request.headers.get("User-Agent") || "";
   if (!ua.startsWith(UA_PREFIX)) {
     return json({ error: "forbidden: ReplayForge User-Agent required" }, 403);
   }
 
-  if (!(await allowRate(request))) {
+  if (!(await allowRate(request, "init"))) {
     return json({ error: "rate limited — try again shortly" }, 429);
   }
 
@@ -93,7 +94,15 @@ async function handleUploadInit(request: Request, env: Env): Promise<Response> {
   return json({ id, uploadUrl, shareUrl });
 }
 
-async function handleUploadComplete(id: string, env: Env): Promise<Response> {
+async function handleUploadComplete(
+  id: string,
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  if (!(await allowRate(request, "complete"))) {
+    return json({ error: "rate limited — try again shortly" }, 429);
+  }
+
   const obj = await env.CLIPS.head(objectKey(id));
   if (!obj) {
     return json({ error: "upload not found — PUT may have failed" }, 404);
@@ -416,25 +425,29 @@ function requireSecrets(env: Env): void {
     "PUBLIC_BASE_URL",
   ] as const) {
     if (!env[key]) {
-      throw new Error(`missing env/secret: ${key}`);
+      // Keep client-facing errors generic — do not leak secret names.
+      throw new Error("share service misconfigured");
     }
   }
 }
 
-/** Soft per-IP rate limit via Cache API (~10 upload inits / minute). */
-async function allowRate(request: Request): Promise<boolean> {
+/** Soft per-IP rate limit via Cache API (~5 actions / minute per bucket). */
+async function allowRate(
+  request: Request,
+  bucket: "init" | "complete",
+): Promise<boolean> {
   const ip =
     request.headers.get("CF-Connecting-IP") ||
     request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ||
     "unknown";
   const minute = Math.floor(Date.now() / 60_000);
   const cacheKey = new Request(
-    `https://replayforge-share.rate/init/${ip}/${minute}`,
+    `https://replayforge-share.rate/${bucket}/${ip}/${minute}`,
   );
   const cache = caches.default;
   const existing = await cache.match(cacheKey);
   const count = existing ? Number(await existing.text()) : 0;
-  if (count >= 10) {
+  if (count >= 5) {
     return false;
   }
   await cache.put(
