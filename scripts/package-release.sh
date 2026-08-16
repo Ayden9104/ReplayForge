@@ -14,12 +14,26 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 echo "Building ReplayForge ${VERSION} (release, locked)..."
+# Honor CARGO_TARGET_DIR when set (e.g. CI/sandbox caches); otherwise use ./target.
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+# If CARGO_TARGET_DIR is a relative path, resolve from cwd after cargo runs.
 cargo build --release --locked --manifest-path "$ROOT/Cargo.toml"
+if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+  TARGET_DIR="$CARGO_TARGET_DIR"
+  [[ "$TARGET_DIR" = /* ]] || TARGET_DIR="$(pwd)/$TARGET_DIR"
+else
+  TARGET_DIR="$ROOT/target"
+fi
+BIN="$TARGET_DIR/release/replayforge"
+if [[ ! -x "$BIN" ]]; then
+  echo "error: expected release binary at $BIN" >&2
+  exit 1
+fi
 
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
-install -Dm755 "$ROOT/target/release/replayforge" "$STAGE/replayforge"
+install -Dm755 "$BIN" "$STAGE/replayforge"
 install -Dm644 "$ROOT/assets/replayforge.desktop" "$STAGE/replayforge.desktop"
 install -Dm644 "$ROOT/assets/replayforge.svg" "$STAGE/replayforge.svg"
 # Standalone installer for people who only download the tarball.
