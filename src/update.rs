@@ -32,6 +32,20 @@ pub fn check_latest() -> Result<UpdateInfo, String> {
         .unwrap_or_else(|| format!("https://github.com/{REPO}/releases/tag/{}", tag.trim()));
     let html_url = sanitize_release_html_url(&html_url, tag.trim())?;
 
+    let current = current_version();
+    let newer = is_newer(&latest, current)?;
+
+    if !newer {
+        return Ok(UpdateInfo {
+            latest,
+            html_url,
+            newer: false,
+            tarball_url: String::new(),
+            sha256sums_url: String::new(),
+            tarball_name: String::new(),
+        });
+    }
+
     let assets = github_assets(&body);
     let (tarball_name, tarball_url) = assets
         .iter()
@@ -54,13 +68,10 @@ pub fn check_latest() -> Result<UpdateInfo, String> {
     require_https(&tarball_url)?;
     require_https(&sha256sums_url)?;
 
-    let current = current_version();
-    let newer = is_newer(&latest, current)?;
-
     Ok(UpdateInfo {
         latest,
         html_url,
-        newer,
+        newer: true,
         tarball_url,
         sha256sums_url,
         tarball_name,
@@ -510,25 +521,82 @@ fn parse_json_string_after_key(after_key: &str) -> Option<String> {
 }
 
 /// Collect `(name, browser_download_url)` pairs from a GitHub release JSON body.
+///
+/// Walks `browser_download_url` first, then looks backward for the nearest `"name"`
+/// (GitHub puts a large nested `uploader` object between those fields).
 fn github_assets(json: &str) -> Vec<(String, String)> {
+    const LOOKBACK: usize = 16 * 1024;
     let mut assets = Vec::new();
-    let mut search = json;
-    while let Some(name_rel) = search.find("\"name\"") {
-        let after_name = &search[name_rel + "\"name\"".len()..];
-        let Some(name) = parse_json_string_after_key(after_name) else {
-            search = &search[name_rel + 6..];
+    let mut search_from = 0usize;
+    let key = "\"browser_download_url\"";
+
+    while let Some(rel) = json[search_from..].find(key) {
+        let url_key_at = search_from + rel;
+        let after_url = &json[url_key_at + key.len()..];
+        let Some(url) = parse_json_string_after_key(after_url) else {
+            search_from = url_key_at + key.len();
             continue;
         };
-        let window = &search[name_rel..search.len().min(name_rel + 1200)];
-        if let Some(url_rel) = window.find("\"browser_download_url\"") {
-            let after_url = &window[url_rel + "\"browser_download_url\"".len()..];
-            if let Some(url) = parse_json_string_after_key(after_url) {
-                assets.push((name, url));
+
+        let lookback_start = url_key_at.saturating_sub(LOOKBACK);
+        let before = &json[lookback_start..url_key_at];
+        let Some(name) = nearest_preceding_asset_name(before) else {
+            search_from = url_key_at + key.len();
+            continue;
+        };
+
+        assets.push((name, url));
+        search_from = url_key_at + key.len();
+    }
+    assets
+}
+
+fn is_release_asset_name(name: &str) -> bool {
+    name == "SHA256SUMS"
+        || name.ends_with(".tar.gz")
+        || (name.starts_with("replayforge-") && name.contains('.'))
+}
+
+/// Nearest preceding `"name"` that looks like a release asset (skip uploader display names).
+fn nearest_preceding_asset_name(before: &str) -> Option<String> {
+    let mut last: Option<String> = None;
+    let mut search = before;
+    while let Some(name_rel) = search.find("\"name\"") {
+        let after_name = &search[name_rel + "\"name\"".len()..];
+        if let Some(name) = parse_json_string_after_key(after_name) {
+            if is_release_asset_name(&name) {
+                last = Some(name);
             }
         }
         search = &search[name_rel + 6..];
     }
-    assets
+    last
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pairs_name_across_large_uploader_gap() {
+        let gap = "x".repeat(3000);
+        let json = format!(
+            r#"{{"assets":[{{"name":"replayforge-0.1.3-linux-x86_64.tar.gz","uploader":{{"login":"x","name":"Not An Asset","pad":"{gap}"}},"browser_download_url":"https://github.com/Ayden9104/ReplayForge/releases/download/v0.1.3/replayforge-0.1.3-linux-x86_64.tar.gz"}},{{"name":"SHA256SUMS","uploader":{{"login":"x","name":"Nope"}},"browser_download_url":"https://github.com/Ayden9104/ReplayForge/releases/download/v0.1.3/SHA256SUMS"}}]}}"#
+        );
+        let assets = github_assets(&json);
+        assert!(
+            assets.iter().any(|(n, u)| {
+                n == "replayforge-0.1.3-linux-x86_64.tar.gz" && u.starts_with("https://")
+            }),
+            "assets={assets:?}"
+        );
+        assert!(
+            assets
+                .iter()
+                .any(|(n, u)| n == "SHA256SUMS" && u.starts_with("https://")),
+            "assets={assets:?}"
+        );
+    }
 }
 
 fn summarize_body(body: &str) -> String {
