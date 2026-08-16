@@ -1614,7 +1614,20 @@ impl ReplayForge {
                 let (status_color, status_text) = if self.saving {
                     (theme::accent(), "Saving clip…")
                 } else if replay_running {
-                    (theme::status_running(), "Replay running")
+                    // Soft blink so a live buffer is obvious at a glance.
+                    let t = ui.input(|i| i.time);
+                    let pulse =
+                        0.35 + 0.65 * (0.5 + 0.5 * (t * std::f64::consts::TAU * 1.1).sin()) as f32;
+                    let base = theme::status_running();
+                    (
+                        egui::Color32::from_rgba_unmultiplied(
+                            base.r(),
+                            base.g(),
+                            base.b(),
+                            (pulse * 255.0) as u8,
+                        ),
+                        "Replay running",
+                    )
                 } else {
                     (theme::text_muted(), "Replay stopped")
                 };
@@ -1626,6 +1639,7 @@ impl ReplayForge {
             });
 
             if replay_running {
+                ui.ctx().request_repaint_after(Duration::from_millis(33));
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new("Buffer live — press your save hotkey anytime")
