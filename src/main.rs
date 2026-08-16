@@ -10,6 +10,7 @@ mod share;
 mod theme;
 mod tray;
 mod trim_playback;
+mod update;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {

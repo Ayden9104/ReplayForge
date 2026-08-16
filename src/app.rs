@@ -11,7 +11,9 @@ use crate::detect::{
     Detection, clip_duration_secs, format_bytes, format_duration, friendly_audio_app_label,
     probe_clip_meta,
 };
-use crate::host::{notify_desktop, notify_desktop_with_urgency, open_path, reveal_in_file_manager};
+use crate::host::{
+    notify_desktop, notify_desktop_with_urgency, open_path, open_url, reveal_in_file_manager,
+};
 use crate::hotkeys::HotkeyService;
 use crate::recorder::Recorder;
 use crate::sfx;
@@ -19,6 +21,7 @@ use crate::share;
 use crate::theme;
 use crate::tray::{TrayCommand, TrayHandle};
 use crate::trim_playback::TrimPlayback;
+use crate::update::{self, UpdateInfo};
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -92,6 +95,8 @@ pub struct ReplayForge {
     save_rx: Option<Receiver<Result<PathBuf, String>>>,
     sharing: bool,
     share_rx: Option<Receiver<Result<String, String>>>,
+    checking_update: bool,
+    update_rx: Option<Receiver<Result<UpdateInfo, String>>>,
     trim: Option<TrimState>,
     trimming: bool,
     trim_rx: Option<Receiver<Result<PathBuf, String>>>,
@@ -192,6 +197,8 @@ impl ReplayForge {
             save_rx: None,
             sharing: false,
             share_rx: None,
+            checking_update: false,
+            update_rx: None,
             trim: None,
             trimming: false,
             trim_rx: None,
@@ -477,6 +484,57 @@ impl ReplayForge {
                 self.share_rx = None;
                 self.sharing = false;
                 self.toast("Share failed: worker disconnected");
+            }
+        }
+    }
+
+    fn check_for_updates_action(&mut self) {
+        if self.checking_update {
+            self.toast("Update check already in progress…");
+            return;
+        }
+
+        self.checking_update = true;
+        self.toast("Checking for updates…");
+        let (tx, rx) = mpsc::channel();
+        self.update_rx = Some(rx);
+
+        thread::spawn(move || {
+            let result = update::check_latest();
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_update_result(&mut self) {
+        let Some(rx) = &self.update_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(result) => {
+                self.update_rx = None;
+                self.checking_update = false;
+                match result {
+                    Ok(info) => {
+                        let current = update::current_version();
+                        if info.newer {
+                            self.toast(format!(
+                                "Update available: v{} (you have v{current})",
+                                info.latest
+                            ));
+                            open_url(&info.html_url);
+                        } else {
+                            self.toast(format!("You're on the latest version (v{current})"));
+                        }
+                    }
+                    Err(error) => self.toast(error),
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.update_rx = None;
+                self.checking_update = false;
+                self.toast("Update check failed: worker disconnected");
             }
         }
     }
@@ -1262,6 +1320,7 @@ impl eframe::App for ReplayForge {
 
         self.poll_save_result();
         self.poll_share_result(ctx);
+        self.poll_update_result();
         self.poll_trim_result();
         self.poll_trim_filmstrip(ctx);
         self.poll_trim_waveform();
@@ -2743,6 +2802,36 @@ impl ReplayForge {
                     egui::RichText::new(
                         "Share link uploads clips to ReplayForge cloud (max ~500 MB; \
                          links expire after ~7 days). Requires curl on PATH.",
+                    )
+                    .color(theme::text_muted())
+                    .size(12.0),
+                );
+            });
+
+            ui.add_space(12.0);
+
+            theme::section_frame().show(ui, |ui| {
+                ui.heading("About");
+                ui.add_space(8.0);
+                ui.label(format!("ReplayForge v{}", update::current_version()));
+                ui.add_space(6.0);
+                let checking = self.checking_update;
+                if ui
+                    .add_enabled(
+                        !checking,
+                        theme::secondary_button(if checking {
+                            "Checking…"
+                        } else {
+                            "Check for updates"
+                        }),
+                    )
+                    .clicked()
+                {
+                    self.check_for_updates_action();
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "Checks GitHub for a newer release and opens the download page if one exists.",
                     )
                     .color(theme::text_muted())
                     .size(12.0),

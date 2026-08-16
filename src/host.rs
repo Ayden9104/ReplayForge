@@ -46,6 +46,12 @@ pub fn open_path(path: &Path) {
     }
 }
 
+pub fn open_url(url: &str) {
+    if let Err(error) = host_command("xdg-open", &[url]).spawn() {
+        eprintln!("Failed to open URL {url}: {error}");
+    }
+}
+
 /// Open the file manager at the clip's parent folder (best-effort).
 pub fn reveal_in_file_manager(path: &Path) {
     if let Some(parent) = path.parent().filter(|p| p.as_os_str().len() > 0) {
