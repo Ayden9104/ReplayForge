@@ -1,9 +1,11 @@
 //! Upload clips to the ReplayForge share Worker (R2-backed) and return a share URL.
-use std::path::Path;
+use crate::host::host_command;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const MAX_BYTES: u64 = 500 * 1024 * 1024;
-const USER_AGENT: &str = "ReplayForge/0.1";
+const USER_AGENT: &str = "ReplayForge/0.1.9";
 
 /// Upload `path` via `{share_api_base}` and return the public share URL (`/c/:id`).
 pub fn upload_share_link(path: &Path, share_api_base: &str) -> Result<String, String> {
@@ -72,6 +74,10 @@ pub fn upload_share_link(path: &Path, share_api_base: &str) -> Result<String, St
     if !share_url.starts_with("https://") {
         return Err("Share init returned a non-https shareUrl".into());
     }
+    // Optional — older workers omit this; share still succeeds without a poster.
+    let thumb_upload_url = json_string_field(&init_text, "thumbUploadUrl")
+        .filter(|u| u.starts_with("https://"));
+
     let put_out = run_curl(&[
         "-sS",
         "--max-time",
@@ -101,6 +107,10 @@ pub fn upload_share_link(path: &Path, share_api_base: &str) -> Result<String, St
         ));
     }
 
+    if let Some(thumb_url) = thumb_upload_url {
+        let _ = upload_share_poster(&abs, &thumb_url);
+    }
+
     let complete_out = run_curl(&[
         "-sS",
         "--max-time",
@@ -123,6 +133,80 @@ pub fn upload_share_link(path: &Path, share_api_base: &str) -> Result<String, St
 
 pub fn share_link_note(_url: &str) -> &'static str {
     "cloud share link (expires in ~7 days)"
+}
+
+/// Best-effort JPEG poster for Discord/Open Graph. Failures are ignored by the caller.
+fn upload_share_poster(clip: &Path, thumb_upload_url: &str) -> Result<(), String> {
+    let jpeg_path = make_share_jpeg(clip)?;
+    let put_out = run_curl(&[
+        "-sS",
+        "--max-time",
+        "60",
+        "-A",
+        USER_AGENT,
+        "-X",
+        "PUT",
+        "-H",
+        "Content-Type: image/jpeg",
+        "--upload-file",
+        &jpeg_path.display().to_string(),
+        thumb_upload_url,
+    ]);
+    let _ = fs::remove_file(&jpeg_path);
+    let put_out = put_out?;
+    if !put_out.status.success() {
+        return Err(format!(
+            "Poster upload failed: {}",
+            summarize_body(&stdout_text(&put_out))
+        ));
+    }
+    Ok(())
+}
+
+fn make_share_jpeg(clip: &Path) -> Result<PathBuf, String> {
+    let out = std::env::temp_dir().join(format!(
+        "replayforge-share-thumb-{}-{}.jpg",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let sidecar = clip.with_extension("png");
+    let (input, seek): (PathBuf, Option<&str>) = if sidecar.is_file() {
+        (sidecar, None)
+    } else {
+        (clip.to_path_buf(), Some("1"))
+    };
+    let input_str = input.to_string_lossy().into_owned();
+    let out_str = out.to_string_lossy().into_owned();
+
+    let mut args: Vec<&str> = vec!["-y"];
+    if let Some(ss) = seek {
+        args.extend_from_slice(&["-ss", ss]);
+    }
+    args.extend_from_slice(&[
+        "-i",
+        &input_str,
+        "-frames:v",
+        "1",
+        "-q:v",
+        "3",
+        "-update",
+        "1",
+        &out_str,
+    ]);
+
+    let status = host_command("ffmpeg", &args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("ffmpeg poster failed: {e}"))?;
+    if !status.success() || !out.is_file() {
+        let _ = fs::remove_file(&out);
+        return Err("ffmpeg could not build share poster".into());
+    }
+    Ok(out)
 }
 
 fn run_curl(args: &[&str]) -> Result<std::process::Output, String> {

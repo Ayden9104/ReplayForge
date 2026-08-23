@@ -53,7 +53,8 @@ npx wrangler deploy
 | `POST` | `/v1/upload` | Body `{ "size": N, "filename": "x.mp4" }`. Requires `User-Agent: ReplayForge/...`. Returns `{ id, uploadUrl, shareUrl }`. |
 | `PUT` | *(presigned R2 URL)* | App uploads raw MP4 with `Content-Type: video/mp4`. |
 | `POST` | `/v1/upload/:id/complete` | Confirms object exists. |
-| `GET` | `/c/:id` | Streams the clip. |
+| `GET` | `/c/:id` | HTML player (Open Graph) or raw MP4 with `?raw=1`. |
+| `GET` | `/c/:id/thumb.jpg` | JPEG poster for Discord/embeds (if uploaded). |
 
 Max size: **500 MB**. Soft rate limit: ~10 upload inits per IP per minute.
 

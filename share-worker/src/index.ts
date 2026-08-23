@@ -12,6 +12,7 @@ export interface Env {
 const MAX_BYTES = 500 * 1024 * 1024;
 const PRESIGN_EXPIRES_SECS = 600;
 const UA_PREFIX = "ReplayForge/";
+const GITHUB_RELEASES = "https://github.com/Ayden9104/ReplayForge/releases/latest";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -32,6 +33,11 @@ export default {
         return cors(await handleUploadComplete(completeMatch[1], request, env));
       }
 
+      const thumbMatch = path.match(/^\/c\/([a-f0-9-]{36})\/thumb\.jpg$/);
+      if (request.method === "GET" && thumbMatch) {
+        return await handleThumbGet(thumbMatch[1], request, env);
+      }
+
       const clipMatch = path.match(/^\/c\/([a-f0-9-]{36})$/);
       if (request.method === "GET" && clipMatch) {
         return await handleClipGet(clipMatch[1], request, env);
@@ -41,7 +47,12 @@ export default {
         return cors(
           json({
             service: "replayforge-share",
-            endpoints: ["POST /v1/upload", "POST /v1/upload/:id/complete", "GET /c/:id"],
+            endpoints: [
+              "POST /v1/upload",
+              "POST /v1/upload/:id/complete",
+              "GET /c/:id",
+              "GET /c/:id/thumb.jpg",
+            ],
           }),
         );
       }
@@ -87,12 +98,12 @@ async function handleUploadInit(request: Request, env: Env): Promise<Response> {
   }
 
   const id = crypto.randomUUID();
-  const key = objectKey(id);
-  const uploadUrl = await presignPut(env, key);
+  const uploadUrl = await presignPut(env, objectKey(id), "video/mp4");
+  const thumbUploadUrl = await presignPut(env, thumbKey(id), "image/jpeg");
   const base = env.PUBLIC_BASE_URL.replace(/\/+$/, "");
   const shareUrl = `${base}/c/${id}`;
 
-  return json({ id, uploadUrl, shareUrl });
+  return json({ id, uploadUrl, thumbUploadUrl, shareUrl });
 }
 
 async function handleUploadComplete(
@@ -132,6 +143,30 @@ async function handleUploadComplete(
   });
 }
 
+async function handleThumbGet(
+  id: string,
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  if (!(await allowRate(request, "get", 60))) {
+    return json({ error: "rate limited — try again shortly" }, 429);
+  }
+
+  const obj = await env.CLIPS.get(thumbKey(id));
+  if (!obj) {
+    return new Response("Not found", { status: 404 });
+  }
+  const headers = new Headers();
+  obj.writeHttpMetadata(headers);
+  headers.set("Content-Type", "image/jpeg");
+  headers.set("Cache-Control", "public, max-age=3600");
+  headers.set("Access-Control-Allow-Origin", "*");
+  if (obj.size) {
+    headers.set("Content-Length", String(obj.size));
+  }
+  return new Response(obj.body, { status: 200, headers });
+}
+
 async function handleClipGet(
   id: string,
   request: Request,
@@ -162,7 +197,9 @@ async function handleClipGet(
   if (!meta) {
     return htmlResponse(notFoundHtml(), 404);
   }
-  return htmlResponse(playerHtml(id), 200);
+  const base = env.PUBLIC_BASE_URL.replace(/\/+$/, "");
+  const hasThumb = !!(await env.CLIPS.head(thumbKey(id)));
+  return htmlResponse(playerHtml(id, base, hasThumb), 200);
 }
 
 /** Raw MP4 when ?raw=1, or Accept prefers video without HTML. */
@@ -222,7 +259,7 @@ function sharedPageCss(): string {
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 20px 16px 32px;
+      padding: max(16px, env(safe-area-inset-top)) 16px max(28px, env(safe-area-inset-bottom));
       transition: background 420ms ease;
     }
     .brand-bar {
@@ -306,11 +343,15 @@ function sharedPageCss(): string {
     }
     .actions {
       margin-top: 18px;
-      text-align: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      justify-content: center;
+      align-items: center;
     }
     .btn {
       display: inline-block;
-      padding: 10px 18px;
+      padding: 12px 20px;
       border-radius: 8px;
       background: var(--accent);
       color: #fff;
@@ -321,6 +362,16 @@ function sharedPageCss(): string {
       transition: background 120ms ease;
     }
     .btn:hover { background: var(--accent-hover); }
+    .btn-ghost {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid rgba(140, 140, 140, 0.35);
+      font-weight: 500;
+    }
+    .btn-ghost:hover {
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text);
+    }
     .center {
       flex: 1;
       display: flex;
@@ -337,17 +388,41 @@ function sharedPageCss(): string {
       line-height: 1.5;
       font-size: 1.05rem;
     }
+    .center .actions { margin-top: 22px; }
 `;
 }
 
-function playerHtml(id: string): string {
-  const rawSrc = `/c/${id}?raw=1`;
+function playerHtml(id: string, baseUrl: string, hasThumb: boolean): string {
+  const pageUrl = `${baseUrl}/c/${id}`;
+  const rawAbs = `${pageUrl}?raw=1`;
+  const rawRel = `/c/${id}?raw=1`;
+  const thumbAbs = `${baseUrl}/c/${id}/thumb.jpg`;
+  const thumbRel = `/c/${id}/thumb.jpg`;
+  const posterAttr = hasThumb ? ` poster="${thumbRel}"` : "";
+  const ogImage = hasThumb
+    ? `
+  <meta property="og:image" content="${thumbAbs}" />
+  <meta property="og:image:type" content="image/jpeg" />
+  <meta property="og:image:width" content="1280" />
+  <meta property="og:image:height" content="720" />`
+    : "";
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ReplayForge — Shared clip</title>
+  <meta property="og:type" content="video.other" />
+  <meta property="og:site_name" content="ReplayForge" />
+  <meta property="og:title" content="ReplayForge — Shared clip" />
+  <meta property="og:description" content="Shared clip · Expires in about 7 days" />
+  <meta property="og:url" content="${pageUrl}" />
+  <meta property="og:video" content="${rawAbs}" />
+  <meta property="og:video:secure_url" content="${rawAbs}" />
+  <meta property="og:video:type" content="video/mp4" />
+  <meta property="og:video:width" content="1280" />
+  <meta property="og:video:height" content="720" />${ogImage}
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet" />
@@ -360,9 +435,10 @@ function playerHtml(id: string): string {
   </div>
   <p class="tag" id="tagline">Shared clip · Expires in about 7 days</p>
   <div class="stage">
-    <video controls playsinline preload="metadata" src="${rawSrc}"></video>
+    <video controls playsinline preload="metadata"${posterAttr} src="${rawRel}"></video>
     <div class="actions">
-      <a class="btn" id="dl-btn" href="${rawSrc}" download>Download MP4</a>
+      <a class="btn" id="dl-btn" href="${rawRel}" download>Download MP4</a>
+      <a class="btn btn-ghost" href="${GITHUB_RELEASES}">Get ReplayForge</a>
     </div>
   </div>
   <script>
@@ -408,13 +484,20 @@ function notFoundHtml(): string {
       ${brandMarkSvg()}
       <h1 class="brand">ReplayForge</h1>
     </div>
-    <p>Clip not found or expired.</p>
+    <p>Clip not found or expired · links last about 7 days</p>
+    <div class="actions">
+      <a class="btn" href="${GITHUB_RELEASES}">Get ReplayForge</a>
+    </div>
   </div>
 </body>
 </html>`;
 }
 
-async function presignPut(env: Env, key: string): Promise<string> {
+async function presignPut(
+  env: Env,
+  key: string,
+  contentType: string,
+): Promise<string> {
   const client = new AwsClient({
     accessKeyId: env.R2_ACCESS_KEY_ID,
     secretAccessKey: env.R2_SECRET_ACCESS_KEY,
@@ -426,7 +509,7 @@ async function presignPut(env: Env, key: string): Promise<string> {
   const signed = await client.sign(
     new Request(url, {
       method: "PUT",
-      headers: { "Content-Type": "video/mp4" },
+      headers: { "Content-Type": contentType },
     }),
     { aws: { signQuery: true } },
   );
@@ -435,6 +518,10 @@ async function presignPut(env: Env, key: string): Promise<string> {
 
 function objectKey(id: string): string {
   return `clips/${id}.mp4`;
+}
+
+function thumbKey(id: string): string {
+  return `clips/${id}.jpg`;
 }
 
 function requireSecrets(env: Env): void {
