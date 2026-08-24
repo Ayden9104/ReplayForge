@@ -1649,19 +1649,37 @@ impl ReplayForge {
     }
 
     fn ui_home(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Home");
-        ui.add_space(8.0);
-
         let replay_running = self.recorder.lock().unwrap().is_running();
+        let last_error = self
+            .recorder
+            .lock()
+            .unwrap()
+            .last_error()
+            .map(str::to_string);
+        let last_clip = self.resolve_last_clip();
 
-        theme::section_frame().show(ui, |ui| {
-            ui.set_max_width(420.0);
+        let mut open_last = false;
+        let mut trim_last = false;
+        let mut copy_last = false;
+        let mut go_settings = false;
 
+        theme::home_section_frame(replay_running).show(ui, |ui| {
+            ui.set_max_width(520.0);
+            let card_w = ui.available_width().min(520.0);
+
+            if let Some(error) = &last_error {
+                ui.colored_label(
+                    theme::error(),
+                    egui::RichText::new(error).size(13.0).strong(),
+                );
+                ui.add_space(10.0);
+            }
+
+            // Hero status
             ui.horizontal(|ui| {
                 let (status_color, status_text) = if self.saving {
                     (theme::accent(), "Saving clip…")
                 } else if replay_running {
-                    // Soft blink so a live buffer is obvious at a glance.
                     let t = ui.input(|i| i.time);
                     let pulse =
                         0.35 + 0.65 * (0.5 + 0.5 * (t * std::f64::consts::TAU * 1.1).sin()) as f32;
@@ -1679,30 +1697,39 @@ impl ReplayForge {
                     (theme::text_muted(), "Replay stopped")
                 };
                 let (dot_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(12.0, 16.0), egui::Sense::hover());
+                    ui.allocate_exact_size(egui::vec2(18.0, 28.0), egui::Sense::hover());
                 ui.painter()
-                    .circle_filled(dot_rect.center(), 5.0, status_color);
-                ui.label(egui::RichText::new(status_text).size(16.0).strong());
+                    .circle_filled(dot_rect.center(), 7.0, status_color);
+                ui.label(
+                    egui::RichText::new(status_text)
+                        .size(26.0)
+                        .strong()
+                        .color(if replay_running && !self.saving {
+                            theme::status_running()
+                        } else if self.saving {
+                            theme::accent_bright()
+                        } else {
+                            egui::Color32::from_gray(210)
+                        }),
+                );
             });
 
             if replay_running {
                 ui.ctx().request_repaint_after(Duration::from_millis(33));
                 ui.add_space(6.0);
                 ui.label(
-                    egui::RichText::new("Buffer live — press your save hotkey anytime")
+                    egui::RichText::new(format!("Press {} to save", self.config.hotkey))
                         .color(theme::status_running())
-                        .size(12.0),
+                        .size(14.0),
                 );
             }
 
             if self.tray_unavailable_reason.is_some() {
                 ui.add_space(8.0);
                 ui.label(
-                    egui::RichText::new(
-                        "System tray unavailable. Closing hides ReplayForge; use Quit in the sidebar to exit — the buffer keeps running while hidden.",
-                    )
-                    .color(theme::text_muted())
-                    .size(12.0),
+                    egui::RichText::new("Tray unavailable — use Quit in the sidebar.")
+                        .color(theme::text_muted())
+                        .size(12.0),
                 )
                 .on_hover_text(
                     self.tray_unavailable_reason
@@ -1711,39 +1738,46 @@ impl ReplayForge {
                 );
             }
 
-            ui.add_space(12.0);
-            ui.label(
-                egui::RichText::new(format!(
-                    "Display: {} · {} · {} FPS · {}s buffer · {}",
-                    self.config.display,
-                    if self.config.resolution == "native" {
-                        "Native"
-                    } else {
-                        self.config.resolution.as_str()
-                    },
-                    self.config.fps,
-                    self.config.buffer_seconds,
-                    self.config.codec
-                ))
-                .color(theme::text_muted())
-                .size(13.0),
-            );
-
-            if let Some(error) = self.recorder.lock().unwrap().last_error() {
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} · {} FPS · {}s",
+                        self.config.display, self.config.fps, self.config.buffer_seconds
+                    ))
+                    .color(theme::text_muted())
+                    .size(13.0),
+                );
                 ui.add_space(8.0);
-                ui.colored_label(theme::error(), error.to_string());
-            }
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("Settings")
+                                .size(13.0)
+                                .color(theme::accent_bright()),
+                        )
+                        .frame(false),
+                    )
+                    .clicked()
+                {
+                    go_settings = true;
+                }
+            });
 
-            ui.add_space(16.0);
+            ui.add_space(18.0);
 
             let button_text = if replay_running {
                 "Stop Replay"
             } else {
                 "Start Replay"
             };
-
+            let primary = if replay_running {
+                theme::secondary_button(button_text)
+            } else {
+                theme::primary_button(button_text)
+            };
             if ui
-                .add_sized([240.0, 42.0], theme::primary_button(button_text))
+                .add_sized([card_w, 48.0], primary)
                 .clicked()
             {
                 if replay_running {
@@ -1763,13 +1797,13 @@ impl ReplayForge {
                 if ui
                     .add_enabled(
                         !self.saving,
-                        theme::secondary_button(save_label).min_size(egui::vec2(240.0, 42.0)),
+                        theme::secondary_button(save_label).min_size(egui::vec2(card_w, 44.0)),
                     )
                     .clicked()
                 {
                     self.save_clip_action();
                 }
-                ui.add_space(8.0);
+                ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new(format!(
                         "Or press {} (global or while focused)",
@@ -1779,7 +1813,133 @@ impl ReplayForge {
                     .size(12.0),
                 );
             }
+
+            if let Some(ref clip_path) = last_clip {
+                ui.add_space(20.0);
+                ui.separator();
+                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new("Last clip")
+                        .size(12.0)
+                        .color(theme::text_muted()),
+                );
+                ui.add_space(8.0);
+
+                let thumb_path = clip_path.with_extension("png");
+                let name = clip_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("clip");
+                let has_live_share = self.share_links.has_live(clip_path);
+
+                ui.horizontal(|ui| {
+                    let thumb_size = egui::vec2(96.0, 54.0);
+                    if let Some(texture) = self.textures.get(&thumb_path) {
+                        let response = ui.add(
+                            egui::Image::new(texture)
+                                .fit_to_exact_size(thumb_size)
+                                .corner_radius(6.0),
+                        );
+                        if response.clicked() {
+                            open_last = true;
+                        }
+                    } else {
+                        let (rect, response) =
+                            ui.allocate_exact_size(thumb_size, egui::Sense::click());
+                        ui.painter()
+                            .rect_filled(rect, 6.0, theme::surface_track());
+                        let label = if thumb_path.exists() {
+                            if self.clip_thumb_inflight.contains(&thumb_path) {
+                                "…"
+                            } else {
+                                "…"
+                            }
+                        } else {
+                            "—"
+                        };
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            label,
+                            egui::FontId::proportional(12.0),
+                            theme::text_muted(),
+                        );
+                        if thumb_path.exists() && ui.is_rect_visible(rect) {
+                            self.schedule_clip_thumb(thumb_path.clone());
+                        }
+                        if response.clicked() {
+                            open_last = true;
+                        }
+                    }
+
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(name).size(15.0).strong());
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.add(theme::secondary_button("Open")).clicked() {
+                                open_last = true;
+                            }
+                            if ui.add(theme::secondary_button("Trim")).clicked() {
+                                trim_last = true;
+                            }
+                            if has_live_share
+                                && ui.add(theme::secondary_button("Copy link")).clicked()
+                            {
+                                copy_last = true;
+                            }
+                        });
+                    });
+                });
+            }
         });
+
+        if go_settings {
+            self.page = Page::Settings;
+        }
+        if let Some(path) = last_clip {
+            if open_last {
+                open_path(&path);
+            }
+            if trim_last {
+                self.open_trim(path.clone());
+            }
+            if copy_last {
+                self.copy_share_link_action(ui.ctx(), path);
+            }
+        }
+    }
+
+    /// Most recent clip for Home: focused save if it still exists, else newest by mtime.
+    fn resolve_last_clip(&self) -> Option<PathBuf> {
+        if let Some(path) = &self.clip_focus {
+            if path.is_file() {
+                return Some(path.clone());
+            }
+        }
+        let dir = &self.config.output_dir;
+        let Ok(entries) = fs::read_dir(dir) else {
+            return None;
+        };
+        let mut best: Option<(SystemTime, PathBuf)> = None;
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if !path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
+            {
+                continue;
+            }
+            let modified = fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            match &best {
+                Some((t, _)) if modified <= *t => {}
+                _ => best = Some((modified, path)),
+            }
+        }
+        best.map(|(_, p)| p)
     }
 
     fn clear_clip_caches(&mut self) {

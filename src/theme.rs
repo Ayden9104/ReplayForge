@@ -62,6 +62,27 @@ pub fn section_frame() -> Frame {
         .stroke(Stroke::new(1.0_f32, stroke_subtle()))
 }
 
+/// Home command card: subtle green tint while the replay buffer is live.
+pub fn home_section_frame(running: bool) -> Frame {
+    let fill = if running {
+        Color32::from_rgba_unmultiplied(80, 200, 120, 18)
+    } else {
+        surface()
+    };
+    Frame::default()
+        .fill(fill)
+        .corner_radius(CORNER_RADIUS)
+        .inner_margin(Margin::same(24))
+        .stroke(Stroke::new(
+            1.0_f32,
+            if running {
+                Color32::from_rgba_unmultiplied(80, 200, 120, 55)
+            } else {
+                stroke_subtle()
+            },
+        ))
+}
+
 /// Compact card for clip grid tiles.
 pub fn card_frame() -> Frame {
     Frame::default()
