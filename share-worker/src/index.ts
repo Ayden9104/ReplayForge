@@ -199,7 +199,8 @@ async function handleClipGet(
   }
   const base = env.PUBLIC_BASE_URL.replace(/\/+$/, "");
   const hasThumb = !!(await env.CLIPS.head(thumbKey(id)));
-  return htmlResponse(playerHtml(id, base, hasThumb), 200);
+  const expiryLine = shareExpiryLine(meta.uploaded);
+  return htmlResponse(playerHtml(id, base, hasThumb, expiryLine), 200);
 }
 
 /** Raw MP4 when ?raw=1, or Accept prefers video without HTML. */
@@ -297,11 +298,12 @@ function sharedPageCss(): string {
       transition: color 280ms ease;
     }
     .tag {
-      margin: 0 0 18px;
+      margin: 0 0 20px;
       color: var(--muted);
-      font-size: 0.9rem;
+      font-size: 0.92rem;
       text-align: center;
-      font-weight: 500;
+      font-weight: 600;
+      letter-spacing: 0.01em;
       min-height: 1.35em;
       transition: color 280ms ease, letter-spacing 280ms ease;
     }
@@ -342,10 +344,10 @@ function sharedPageCss(): string {
       box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
     }
     .actions {
-      margin-top: 18px;
+      margin-top: 20px;
       display: flex;
       flex-wrap: wrap;
-      gap: 12px;
+      gap: 12px 14px;
       justify-content: center;
       align-items: center;
     }
@@ -392,7 +394,26 @@ function sharedPageCss(): string {
 `;
 }
 
-function playerHtml(id: string, baseUrl: string, hasThumb: boolean): string {
+function shareExpiryLine(uploaded: Date | undefined): string {
+  if (!uploaded || Number.isNaN(uploaded.getTime())) {
+    return "Shared clip · Expires in about 7 days";
+  }
+  const expires = new Date(uploaded.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const date = expires.toLocaleDateString("en-US", {
+    timeZone: "UTC",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  return `Shared clip · Expires ${date}`;
+}
+
+function playerHtml(
+  id: string,
+  baseUrl: string,
+  hasThumb: boolean,
+  expiryLine: string,
+): string {
   const pageUrl = `${baseUrl}/c/${id}`;
   const rawAbs = `${pageUrl}?raw=1`;
   const rawRel = `/c/${id}?raw=1`;
@@ -406,6 +427,11 @@ function playerHtml(id: string, baseUrl: string, hasThumb: boolean): string {
   <meta property="og:image:width" content="1280" />
   <meta property="og:image:height" content="720" />`
     : "";
+  const expiryEsc = expiryLine
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;");
+  const expiryJs = JSON.stringify(expiryLine);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -416,7 +442,7 @@ function playerHtml(id: string, baseUrl: string, hasThumb: boolean): string {
   <meta property="og:type" content="video.other" />
   <meta property="og:site_name" content="ReplayForge" />
   <meta property="og:title" content="ReplayForge — Shared clip" />
-  <meta property="og:description" content="Shared clip · Expires in about 7 days" />
+  <meta property="og:description" content="${expiryEsc}" />
   <meta property="og:url" content="${pageUrl}" />
   <meta property="og:video" content="${rawAbs}" />
   <meta property="og:video:secure_url" content="${rawAbs}" />
@@ -433,7 +459,7 @@ function playerHtml(id: string, baseUrl: string, hasThumb: boolean): string {
     ${brandMarkSvg()}
     <h1 class="brand">ReplayForge</h1>
   </div>
-  <p class="tag" id="tagline">Shared clip · Expires in about 7 days</p>
+  <p class="tag" id="tagline">${expiryEsc}</p>
   <div class="stage">
     <video controls playsinline preload="metadata"${posterAttr} src="${rawRel}"></video>
     <div class="actions">
@@ -448,7 +474,7 @@ function playerHtml(id: string, baseUrl: string, hasThumb: boolean): string {
       var brand = document.getElementById("brand-egg");
       var tag = document.getElementById("tagline");
       var btn = document.getElementById("dl-btn");
-      var normalTag = "Shared clip · Expires in about 7 days";
+      var normalTag = ${expiryJs};
       var joeTag = "Chicken Joe says it's all good, brah";
       if (!brand || !tag || !btn) return;
       brand.addEventListener("click", function () {

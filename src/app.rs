@@ -99,6 +99,8 @@ pub struct ReplayForge {
     /// Clip path for the in-flight share upload (for persisting the URL).
     pending_share_path: Option<PathBuf>,
     share_links: ShareLinkStore,
+    /// Brief green "Copied" flash on Clips Copy link (path + until).
+    copy_flash: Option<(PathBuf, Instant)>,
     checking_update: bool,
     update_rx: Option<Receiver<Result<UpdateInfo, String>>>,
     pending_update: Option<UpdateInfo>,
@@ -206,6 +208,7 @@ impl ReplayForge {
             share_rx: None,
             pending_share_path: None,
             share_links: ShareLinkStore::load(),
+            copy_flash: None,
             checking_update: false,
             update_rx: None,
             pending_update: None,
@@ -456,7 +459,9 @@ impl ReplayForge {
         match self.share_links.take_live_or_clear_stale(&path) {
             Some(url) => {
                 ctx.copy_text(url);
+                self.copy_flash = Some((path, Instant::now() + Duration::from_millis(1500)));
                 self.toast("Link copied");
+                ctx.request_repaint_after(Duration::from_millis(100));
             }
             None => {
                 self.toast("Link expired — create a new one");
@@ -2172,11 +2177,31 @@ impl ReplayForge {
                                             reveal_req = Some(clip_path.clone());
                                         }
                                         if self.share_links.has_live(clip_path) {
+                                            let copy_flash_active = self
+                                                .copy_flash
+                                                .as_ref()
+                                                .is_some_and(|(p, until)| {
+                                                    p == clip_path && Instant::now() < *until
+                                                });
+                                            if copy_flash_active {
+                                                ui.ctx().request_repaint_after(
+                                                    Duration::from_millis(50),
+                                                );
+                                            } else if self
+                                                .copy_flash
+                                                .as_ref()
+                                                .is_some_and(|(p, _)| p == clip_path)
+                                            {
+                                                self.copy_flash = None;
+                                            }
+                                            let copy_btn = if copy_flash_active {
+                                                theme::secondary_button("Copied")
+                                                    .fill(theme::status_running())
+                                            } else {
+                                                theme::secondary_button("Copy link")
+                                            };
                                             if ui
-                                                .add_enabled(
-                                                    !self.sharing,
-                                                    theme::secondary_button("Copy link"),
-                                                )
+                                                .add_enabled(!self.sharing, copy_btn)
                                                 .on_hover_text(
                                                     "Copy the existing cloud link (no re-upload)",
                                                 )
@@ -2966,8 +2991,8 @@ impl ReplayForge {
                 ui.label(
                     egui::RichText::new(
                         "Create link uploads a clip once to ReplayForge cloud (max ~500 MB). \
-                         Copy link reuses that URL until it expires (~7 days). New link uploads again. \
-                         Requires curl on PATH.",
+                         Copy link reuses that URL; the share page shows the expiry date (~7 days). \
+                         New link uploads again. Requires curl on PATH.",
                     )
                     .color(theme::text_muted())
                     .size(12.0),
