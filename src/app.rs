@@ -1517,7 +1517,7 @@ impl eframe::App for ReplayForge {
             .default_width(200.0)
             .frame(
                 egui::Frame::default()
-                    .fill(egui::Color32::from_gray(20))
+                    .fill(theme::panel_fill())
                     .inner_margin(egui::Margin::symmetric(12, 16)),
             )
             .show(ctx, |ui| {
@@ -1673,249 +1673,239 @@ impl ReplayForge {
             ui.set_max_width(480.0);
             let card_w = ui.available_width();
 
-                if let Some(error) = &last_error {
-                    ui.colored_label(
-                        theme::error(),
-                        egui::RichText::new(error).size(13.0).strong(),
-                    );
-                    ui.add_space(10.0);
-                }
+            if let Some(error) = &last_error {
+                ui.colored_label(
+                    theme::error(),
+                    egui::RichText::new(error).size(13.0).strong(),
+                );
+                ui.add_space(10.0);
+            }
 
-                // Hero status
-                ui.horizontal(|ui| {
-                    let (status_color, status_text) = if self.saving {
-                        (theme::accent(), "Saving clip…")
-                    } else if replay_running {
-                        let t = ui.input(|i| i.time);
-                        let pulse = 0.35
-                            + 0.65 * (0.5 + 0.5 * (t * std::f64::consts::TAU * 1.1).sin()) as f32;
-                        let base = theme::status_running();
-                        (
-                            egui::Color32::from_rgba_unmultiplied(
-                                base.r(),
-                                base.g(),
-                                base.b(),
-                                (pulse * 255.0) as u8,
-                            ),
-                            "Replay running",
-                        )
-                    } else {
-                        (theme::text_muted(), "Replay stopped")
-                    };
-                    let (dot_rect, _) =
-                        ui.allocate_exact_size(egui::vec2(22.0, 30.0), egui::Sense::hover());
-                    let c = dot_rect.center();
-                    if replay_running && !self.saving {
-                        let ring = theme::status_running();
-                        ui.painter().circle_stroke(
-                            c,
-                            11.0,
-                            egui::Stroke::new(
-                                2.0_f32,
-                                egui::Color32::from_rgba_unmultiplied(
-                                    ring.r(),
-                                    ring.g(),
-                                    ring.b(),
-                                    70,
-                                ),
-                            ),
-                        );
-                    }
-                    ui.painter().circle_filled(c, 7.0, status_color);
-                    ui.label(
-                        egui::RichText::new(status_text)
-                            .size(26.0)
-                            .strong()
-                            .color(if replay_running && !self.saving {
-                                theme::status_running()
-                            } else if self.saving {
-                                theme::accent_bright()
-                            } else {
-                                egui::Color32::from_gray(210)
-                            }),
-                    );
-                });
-
-                if self.saving {
-                    // no invite line
+            // Hero status
+            ui.horizontal(|ui| {
+                let (status_color, status_text) = if self.saving {
+                    (theme::accent(), "Saving clip…")
                 } else if replay_running {
-                    ui.ctx().request_repaint_after(Duration::from_millis(33));
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new(format!("Press {} to save", self.config.hotkey))
-                            .color(theme::status_running())
-                            .size(14.0),
-                    );
-                } else {
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new("Ready when you are")
-                            .color(theme::text_muted())
-                            .size(14.0),
-                    );
-                }
-
-                if self.tray_unavailable_reason.is_some() {
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new("Tray unavailable — use Quit in the sidebar.")
-                            .color(theme::text_muted())
-                            .size(12.0),
+                    let t = ui.input(|i| i.time);
+                    let pulse =
+                        0.35 + 0.65 * (0.5 + 0.5 * (t * std::f64::consts::TAU * 1.1).sin()) as f32;
+                    let base = theme::status_running();
+                    (
+                        egui::Color32::from_rgba_unmultiplied(
+                            base.r(),
+                            base.g(),
+                            base.b(),
+                            (pulse * 255.0) as u8,
+                        ),
+                        "Replay running",
                     )
-                    .on_hover_text(
-                        self.tray_unavailable_reason
-                            .as_deref()
-                            .unwrap_or("Tray unavailable"),
+                } else {
+                    (theme::text_muted(), "Replay stopped")
+                };
+                let (dot_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(22.0, 30.0), egui::Sense::hover());
+                let c = dot_rect.center();
+                if replay_running && !self.saving {
+                    let ring = theme::status_running();
+                    ui.painter().circle_stroke(
+                        c,
+                        11.0,
+                        egui::Stroke::new(
+                            2.0_f32,
+                            egui::Color32::from_rgba_unmultiplied(ring.r(), ring.g(), ring.b(), 70),
+                        ),
                     );
                 }
+                ui.painter().circle_filled(c, 7.0, status_color);
+                ui.label(egui::RichText::new(status_text).size(26.0).strong().color(
+                    if replay_running && !self.saving {
+                        theme::status_running()
+                    } else if self.saving {
+                        theme::accent_bright()
+                    } else {
+                        egui::Color32::from_gray(210)
+                    },
+                ));
+            });
 
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{} · {} FPS · {}s",
-                            self.config.display, self.config.fps, self.config.buffer_seconds
-                        ))
+            if self.saving {
+                // no invite line
+            } else if replay_running {
+                ui.ctx().request_repaint_after(Duration::from_millis(33));
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!("Press {} to save", self.config.hotkey))
+                        .color(theme::status_running())
+                        .size(14.0),
+                );
+            } else {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new("Ready when you are")
+                        .color(theme::text_muted())
+                        .size(14.0),
+                );
+            }
+
+            if self.tray_unavailable_reason.is_some() {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("Tray unavailable — use Quit in the sidebar.")
                         .color(theme::text_muted())
                         .size(12.0),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("Settings")
-                                        .size(12.0)
-                                        .color(theme::accent_bright()),
-                                )
-                                .frame(false),
-                            )
-                            .clicked()
-                        {
-                            go_settings = true;
-                        }
-                    });
-                });
+                )
+                .on_hover_text(
+                    self.tray_unavailable_reason
+                        .as_deref()
+                        .unwrap_or("Tray unavailable"),
+                );
+            }
 
-                ui.add_space(14.0);
-
-                if replay_running {
-                    let save_label = if self.saving {
-                        "Saving…"
-                    } else {
-                        "Save Clip"
-                    };
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} · {} FPS · {}s",
+                        self.config.display, self.config.fps, self.config.buffer_seconds
+                    ))
+                    .color(theme::text_muted())
+                    .size(12.0),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .add_enabled(
-                            !self.saving,
-                            theme::primary_button(save_label).min_size(egui::vec2(card_w, 48.0)),
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("Settings")
+                                    .size(12.0)
+                                    .color(theme::accent_bright()),
+                            )
+                            .frame(false),
                         )
                         .clicked()
                     {
-                        self.save_clip_action();
+                        go_settings = true;
                     }
-                    ui.add_space(10.0);
-                    if ui
-                        .add_sized([card_w, 44.0], theme::secondary_button("Stop Replay"))
-                        .clicked()
-                    {
-                        self.stop_replay();
-                    }
-                } else if ui
-                    .add_sized([card_w, 48.0], theme::primary_button("Start Replay"))
+                });
+            });
+
+            ui.add_space(14.0);
+
+            if replay_running {
+                let save_label = if self.saving {
+                    "Saving…"
+                } else {
+                    "Save Clip"
+                };
+                if ui
+                    .add_enabled(
+                        !self.saving,
+                        theme::primary_button(save_label).min_size(egui::vec2(card_w, 48.0)),
+                    )
                     .clicked()
                 {
-                    self.start_replay();
+                    self.save_clip_action();
                 }
+                ui.add_space(10.0);
+                if ui
+                    .add_sized([card_w, 44.0], theme::secondary_button("Stop Replay"))
+                    .clicked()
+                {
+                    self.stop_replay();
+                }
+            } else if ui
+                .add_sized([card_w, 48.0], theme::primary_button("Start Replay"))
+                .clicked()
+            {
+                self.start_replay();
+            }
 
-                if let Some(ref clip_path) = last_clip {
-                    ui.add_space(14.0);
-                    ui.label(
-                        egui::RichText::new("Last clip")
-                            .size(11.0)
-                            .color(theme::text_muted()),
-                    );
-                    ui.add_space(6.0);
+            if let Some(ref clip_path) = last_clip {
+                ui.add_space(14.0);
+                ui.label(
+                    egui::RichText::new("Last clip")
+                        .size(11.0)
+                        .color(theme::text_muted()),
+                );
+                ui.add_space(6.0);
 
-                    let thumb_path = clip_path.with_extension("png");
-                    let name = clip_path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("clip");
-                    let display_name = if name.chars().count() > 36 {
-                        format!("{}…", name.chars().take(35).collect::<String>())
-                    } else {
-                        name.to_string()
-                    };
-                    let has_live_share = self.share_links.has_live(clip_path);
+                let thumb_path = clip_path.with_extension("png");
+                let name = clip_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("clip");
+                let display_name = if name.chars().count() > 36 {
+                    format!("{}…", name.chars().take(35).collect::<String>())
+                } else {
+                    name.to_string()
+                };
+                let has_live_share = self.share_links.has_live(clip_path);
 
-                    theme::home_last_clip_frame().show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let thumb_size = egui::vec2(80.0, 45.0);
-                            if let Some(texture) = self.textures.get(&thumb_path) {
-                                let response = ui.add(
-                                    egui::Image::new(texture)
-                                        .fit_to_exact_size(thumb_size)
-                                        .corner_radius(6.0)
-                                        .bg_fill(theme::surface_dim()),
-                                );
-                                let r = response.rect;
-                                ui.painter().rect_stroke(
-                                    r,
-                                    6.0,
-                                    egui::Stroke::new(1.0_f32, theme::stroke_subtle()),
-                                    egui::StrokeKind::Outside,
-                                );
-                                if response.clicked() {
-                                    open_last = true;
-                                }
-                            } else {
-                                let (rect, response) =
-                                    ui.allocate_exact_size(thumb_size, egui::Sense::click());
-                                ui.painter().rect_filled(rect, 6.0, theme::surface());
-                                ui.painter().rect_stroke(
-                                    rect,
-                                    6.0,
-                                    egui::Stroke::new(1.0_f32, theme::stroke_subtle()),
-                                    egui::StrokeKind::Outside,
-                                );
-                                ui.painter().text(
-                                    rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    if thumb_path.exists() { "…" } else { "—" },
-                                    egui::FontId::proportional(12.0),
-                                    theme::text_muted(),
-                                );
-                                if thumb_path.exists() && ui.is_rect_visible(rect) {
-                                    self.schedule_clip_thumb(thumb_path.clone());
-                                }
-                                if response.clicked() {
-                                    open_last = true;
-                                }
+                theme::home_last_clip_frame().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let thumb_size = egui::vec2(80.0, 45.0);
+                        if let Some(texture) = self.textures.get(&thumb_path) {
+                            let response = ui.add(
+                                egui::Image::new(texture)
+                                    .fit_to_exact_size(thumb_size)
+                                    .corner_radius(6.0)
+                                    .bg_fill(theme::surface_dim()),
+                            );
+                            let r = response.rect;
+                            ui.painter().rect_stroke(
+                                r,
+                                6.0,
+                                egui::Stroke::new(1.0_f32, theme::stroke_subtle()),
+                                egui::StrokeKind::Outside,
+                            );
+                            if response.clicked() {
+                                open_last = true;
                             }
+                        } else {
+                            let (rect, response) =
+                                ui.allocate_exact_size(thumb_size, egui::Sense::click());
+                            ui.painter().rect_filled(rect, 6.0, theme::surface());
+                            ui.painter().rect_stroke(
+                                rect,
+                                6.0,
+                                egui::Stroke::new(1.0_f32, theme::stroke_subtle()),
+                                egui::StrokeKind::Outside,
+                            );
+                            ui.painter().text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                if thumb_path.exists() { "…" } else { "—" },
+                                egui::FontId::proportional(12.0),
+                                theme::text_muted(),
+                            );
+                            if thumb_path.exists() && ui.is_rect_visible(rect) {
+                                self.schedule_clip_thumb(thumb_path.clone());
+                            }
+                            if response.clicked() {
+                                open_last = true;
+                            }
+                        }
 
-                            ui.add_space(10.0);
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    egui::RichText::new(display_name).size(15.0).strong(),
-                                );
-                                ui.add_space(6.0);
-                                ui.horizontal(|ui| {
-                                    if ui.add(theme::secondary_button("Open")).clicked() {
-                                        open_last = true;
-                                    }
-                                    if ui.add(theme::secondary_button("Trim")).clicked() {
-                                        trim_last = true;
-                                    }
-                                    if has_live_share
-                                        && ui.add(theme::secondary_button("Copy link")).clicked()
-                                    {
-                                        copy_last = true;
-                                    }
-                                });
+                        ui.add_space(10.0);
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(display_name).size(15.0).strong());
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if ui.add(theme::secondary_button("Open")).clicked() {
+                                    open_last = true;
+                                }
+                                if ui.add(theme::secondary_button("Trim")).clicked() {
+                                    trim_last = true;
+                                }
+                                if has_live_share
+                                    && ui.add(theme::secondary_button("Copy link")).clicked()
+                                {
+                                    copy_last = true;
+                                }
                             });
                         });
                     });
-                }
+                });
+            }
         });
 
         if go_settings {
@@ -2331,35 +2321,13 @@ impl ReplayForge {
                                             .size(12.0),
                                     );
                                     ui.add_space(4.0);
-                                    ui.horizontal_wrapped(|ui| {
+                                    let has_live_share = self.share_links.has_live(clip_path);
+                                    ui.horizontal(|ui| {
                                         if focused {
                                             if ui.add(theme::primary_button("Trim")).clicked() {
                                                 start_trim_req = Some(clip_path.clone());
                                             }
-                                            if ui.add(theme::secondary_button("Open")).clicked() {
-                                                open_path_req = Some(clip_path.clone());
-                                            }
-                                        } else if ui.add(theme::secondary_button("Open")).clicked()
-                                        {
-                                            open_path_req = Some(clip_path.clone());
-                                        }
-                                        if ui
-                                            .add(theme::secondary_button("Copy path"))
-                                            .on_hover_text("Copy full path to clipboard")
-                                            .clicked()
-                                        {
-                                            copy_path_req = Some(clip_path.clone());
-                                        }
-                                        if ui
-                                            .add(theme::secondary_button("Show in folder"))
-                                            .on_hover_text(
-                                                "Open the clips folder in your file manager",
-                                            )
-                                            .clicked()
-                                        {
-                                            reveal_req = Some(clip_path.clone());
-                                        }
-                                        if self.share_links.has_live(clip_path) {
+                                        } else if has_live_share {
                                             let copy_flash_active = self
                                                 .copy_flash
                                                 .as_ref()
@@ -2378,10 +2346,10 @@ impl ReplayForge {
                                                 self.copy_flash = None;
                                             }
                                             let copy_btn = if copy_flash_active {
-                                                theme::secondary_button("Copied")
+                                                theme::primary_button("Copied")
                                                     .fill(theme::status_running())
                                             } else {
-                                                theme::secondary_button("Copy link")
+                                                theme::primary_button("Copy link")
                                             };
                                             if ui
                                                 .add_enabled(!self.sharing, copy_btn)
@@ -2392,26 +2360,10 @@ impl ReplayForge {
                                             {
                                                 share_copy_req = Some(clip_path.clone());
                                             }
-                                            if ui
-                                                .add_enabled(
-                                                    !self.sharing,
-                                                    theme::secondary_button(if self.sharing {
-                                                        "Sharing…"
-                                                    } else {
-                                                        "New link"
-                                                    }),
-                                                )
-                                                .on_hover_text(
-                                                    "Upload again and replace the saved link",
-                                                )
-                                                .clicked()
-                                            {
-                                                share_new_req = Some(clip_path.clone());
-                                            }
                                         } else if ui
                                             .add_enabled(
                                                 !self.sharing,
-                                                theme::secondary_button(if self.sharing {
+                                                theme::primary_button(if self.sharing {
                                                     "Sharing…"
                                                 } else {
                                                     "Create link"
@@ -2424,18 +2376,70 @@ impl ReplayForge {
                                         {
                                             share_create_req = Some(clip_path.clone());
                                         }
-                                        if ui.add(theme::secondary_button("Rename")).clicked() {
-                                            start_rename = Some(clip_path.clone());
-                                        }
-                                        if !focused
-                                            && ui.add(theme::primary_button("Trim")).clicked()
-                                        {
-                                            start_trim_req = Some(clip_path.clone());
-                                        }
-                                        if ui.button("Delete").clicked() {
-                                            self.pending_delete =
-                                                Some((clip_path.clone(), thumbnail_path.clone()));
-                                        }
+
+                                        ui.menu_button("⋯", |ui| {
+                                            if ui.button("Open").clicked() {
+                                                open_path_req = Some(clip_path.clone());
+                                                ui.close();
+                                            }
+                                            if !focused && ui.button("Trim").clicked() {
+                                                start_trim_req = Some(clip_path.clone());
+                                                ui.close();
+                                            }
+                                            if ui.button("Rename").clicked() {
+                                                start_rename = Some(clip_path.clone());
+                                                ui.close();
+                                            }
+                                            if ui
+                                                .button("Show in folder")
+                                                .on_hover_text(
+                                                    "Open the clips folder in your file manager",
+                                                )
+                                                .clicked()
+                                            {
+                                                reveal_req = Some(clip_path.clone());
+                                                ui.close();
+                                            }
+                                            if ui
+                                                .button("Copy path")
+                                                .on_hover_text("Copy full path to clipboard")
+                                                .clicked()
+                                            {
+                                                copy_path_req = Some(clip_path.clone());
+                                                ui.close();
+                                            }
+                                            if has_live_share
+                                                && ui
+                                                    .add_enabled(
+                                                        !self.sharing,
+                                                        egui::Button::new(if self.sharing {
+                                                            "Sharing…"
+                                                        } else {
+                                                            "New link"
+                                                        }),
+                                                    )
+                                                    .on_hover_text(
+                                                        "Upload again and replace the saved link",
+                                                    )
+                                                    .clicked()
+                                            {
+                                                share_new_req = Some(clip_path.clone());
+                                                ui.close();
+                                            }
+                                            if ui
+                                                .button(
+                                                    egui::RichText::new("Delete")
+                                                        .color(theme::error()),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.pending_delete = Some((
+                                                    clip_path.clone(),
+                                                    thumbnail_path.clone(),
+                                                ));
+                                                ui.close();
+                                            }
+                                        });
                                     });
                                 }
                             });
@@ -2569,10 +2573,9 @@ impl ReplayForge {
                     if ui.add(theme::secondary_button("Cancel")).clicked() {
                         cancel = true;
                     }
-                    if ui.button(
-                        egui::RichText::new("Delete").color(theme::error()),
-                    )
-                    .clicked()
+                    if ui
+                        .button(egui::RichText::new("Delete").color(theme::error()))
+                        .clicked()
                     {
                         confirm = true;
                     }
