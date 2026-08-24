@@ -26,8 +26,9 @@ fn main() -> eframe::Result {
         "ReplayForge",
         options,
         Box::new(|cc| {
-            theme::apply_theme(&cc.egui_ctx);
-            Ok(Box::new(app::ReplayForge::new()))
+            let app = app::ReplayForge::new();
+            app.apply_configured_theme(&cc.egui_ctx);
+            Ok(Box::new(app))
         }),
     )
 }

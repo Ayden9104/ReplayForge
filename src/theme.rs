@@ -1,177 +1,345 @@
-//! Shared UI colors and egui ArmA 3–style menu chrome.
+//! Shared UI colors and egui theme chrome (Classic + ArmA 3).
+use crate::config::AppTheme;
 use eframe::egui::{
     Align2, Button, Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
     Frame, Margin, Rect, RichText, Sense, Stroke, Ui, Visuals, vec2,
 };
+use std::sync::Mutex;
 
-pub const CORNER_RADIUS: f32 = 3.0;
+static ACTIVE: Mutex<AppTheme> = Mutex::new(AppTheme::Classic);
+
+#[derive(Clone, Copy)]
+struct ThemeTokens {
+    style: AppTheme,
+    corner_radius: f32,
+    accent: Color32,
+    accent_bright: Color32,
+    surface: Color32,
+    surface_track: Color32,
+    surface_dim: Color32,
+    keep_tint: Color32,
+    text_primary: Color32,
+    text_muted: Color32,
+    text_muted_light: Color32,
+    error: Color32,
+    button_disabled: Color32,
+    status_running: Color32,
+    success: Color32,
+    stroke_subtle: Color32,
+    panel_fill: Color32,
+    extreme_bg: Color32,
+    hover_fill: Color32,
+    active_fill: Color32,
+    noninteractive_bg: Color32,
+    selection_bg: Color32,
+}
+
+fn classic_tokens() -> ThemeTokens {
+    ThemeTokens {
+        style: AppTheme::Classic,
+        corner_radius: 8.0,
+        accent: Color32::from_rgb(70, 130, 220),
+        accent_bright: Color32::from_rgb(100, 200, 255),
+        surface: Color32::from_gray(25),
+        surface_track: Color32::from_gray(30),
+        surface_dim: Color32::from_rgba_unmultiplied(10, 10, 10, 200),
+        keep_tint: Color32::from_rgba_unmultiplied(70, 130, 220, 40),
+        text_primary: Color32::from_gray(230),
+        text_muted: Color32::from_gray(140),
+        text_muted_light: Color32::from_gray(150),
+        error: Color32::from_rgb(220, 80, 80),
+        button_disabled: Color32::from_gray(55),
+        status_running: Color32::from_rgb(80, 200, 120),
+        success: Color32::from_rgb(80, 200, 120),
+        stroke_subtle: Color32::from_gray(48),
+        panel_fill: Color32::from_gray(22),
+        extreme_bg: Color32::from_gray(18),
+        hover_fill: Color32::from_gray(45),
+        active_fill: Color32::from_rgb(60, 110, 187),
+        noninteractive_bg: Color32::from_gray(28),
+        selection_bg: Color32::from_rgba_unmultiplied(70, 130, 220, 90),
+    }
+}
+
+fn arma3_tokens() -> ThemeTokens {
+    ThemeTokens {
+        style: AppTheme::Arma3,
+        corner_radius: 3.0,
+        accent: Color32::from_rgb(196, 122, 32),
+        accent_bright: Color32::from_rgb(224, 144, 48),
+        surface: Color32::from_rgb(32, 34, 30),
+        surface_track: Color32::from_rgb(40, 42, 38),
+        surface_dim: Color32::from_rgba_unmultiplied(10, 11, 9, 200),
+        keep_tint: Color32::from_rgba_unmultiplied(196, 122, 32, 28),
+        text_primary: Color32::from_rgb(230, 230, 226),
+        text_muted: Color32::from_rgb(150, 150, 146),
+        text_muted_light: Color32::from_rgb(170, 170, 166),
+        error: Color32::from_rgb(180, 72, 60),
+        button_disabled: Color32::from_rgb(48, 50, 46),
+        status_running: Color32::from_rgb(210, 210, 204),
+        success: Color32::from_rgb(90, 130, 70),
+        stroke_subtle: Color32::from_rgb(72, 74, 68),
+        panel_fill: Color32::from_rgb(18, 19, 16),
+        extreme_bg: Color32::from_rgb(14, 15, 12),
+        hover_fill: Color32::from_rgb(48, 50, 46),
+        active_fill: Color32::from_rgb(52, 54, 50),
+        noninteractive_bg: Color32::from_rgb(28, 30, 26),
+        selection_bg: Color32::from_rgba_unmultiplied(196, 122, 32, 55),
+    }
+}
+
+fn set_theme(theme: AppTheme) {
+    if let Ok(mut guard) = ACTIVE.lock() {
+        *guard = theme;
+    }
+}
+
+fn tokens() -> ThemeTokens {
+    let theme = ACTIVE.lock().map(|g| *g).unwrap_or(AppTheme::Classic);
+    match theme {
+        AppTheme::Classic => classic_tokens(),
+        AppTheme::Arma3 => arma3_tokens(),
+    }
+}
+
+/// Corner radius for the active theme (used by trim preview chrome).
+pub fn corner_radius() -> f32 {
+    tokens().corner_radius
+}
 
 pub fn accent() -> Color32 {
-    Color32::from_rgb(196, 122, 32)
+    tokens().accent
 }
 
 pub fn accent_bright() -> Color32 {
-    Color32::from_rgb(224, 144, 48)
+    tokens().accent_bright
 }
 
 pub fn surface() -> Color32 {
-    Color32::from_rgb(32, 34, 30)
+    tokens().surface
 }
 
 pub fn surface_track() -> Color32 {
-    Color32::from_rgb(40, 42, 38)
+    tokens().surface_track
 }
 
 pub fn surface_dim() -> Color32 {
-    Color32::from_rgba_unmultiplied(10, 11, 9, 200)
+    tokens().surface_dim
 }
 
 pub fn keep_tint() -> Color32 {
-    Color32::from_rgba_unmultiplied(196, 122, 32, 28)
+    tokens().keep_tint
 }
 
 pub fn text_primary() -> Color32 {
-    Color32::from_rgb(230, 230, 226)
+    tokens().text_primary
 }
 
 pub fn text_muted() -> Color32 {
-    Color32::from_rgb(150, 150, 146)
+    tokens().text_muted
 }
 
 pub fn text_muted_light() -> Color32 {
-    Color32::from_rgb(170, 170, 166)
+    tokens().text_muted_light
 }
 
 pub fn error() -> Color32 {
-    Color32::from_rgb(180, 72, 60)
+    tokens().error
 }
 
 pub fn button_disabled() -> Color32 {
-    Color32::from_rgb(48, 50, 46)
+    tokens().button_disabled
 }
 
-/// Quiet live/idle indicator (not neon green).
 pub fn status_running() -> Color32 {
-    Color32::from_rgb(210, 210, 204)
+    tokens().status_running
 }
 
-/// Success flash only (e.g. Copied).
 pub fn success() -> Color32 {
-    Color32::from_rgb(90, 130, 70)
+    tokens().success
 }
 
 pub fn stroke_subtle() -> Color32 {
-    Color32::from_rgb(72, 74, 68)
+    tokens().stroke_subtle
 }
 
 pub fn panel_fill() -> Color32 {
-    Color32::from_rgb(18, 19, 16)
-}
-
-pub fn extreme_bg() -> Color32 {
-    Color32::from_rgb(14, 15, 12)
+    tokens().panel_fill
 }
 
 pub fn section_frame() -> Frame {
+    let t = tokens();
     Frame::default()
-        .fill(surface())
-        .corner_radius(CORNER_RADIUS)
+        .fill(t.surface)
+        .corner_radius(t.corner_radius)
         .inner_margin(Margin::same(20))
-        .stroke(Stroke::new(1.0_f32, stroke_subtle()))
+        .stroke(Stroke::new(1.0_f32, t.stroke_subtle))
 }
 
-/// Home command card — same surface idle/live; thin orange stroke while running.
 pub fn home_section_frame(running: bool) -> Frame {
-    Frame::default()
-        .fill(surface())
-        .corner_radius(CORNER_RADIUS)
-        .inner_margin(Margin::same(24))
-        .stroke(Stroke::new(
-            1.0_f32,
-            if running {
-                accent()
+    let t = tokens();
+    match t.style {
+        AppTheme::Classic => {
+            let fill = if running {
+                Color32::from_rgba_unmultiplied(
+                    t.status_running.r(),
+                    t.status_running.g(),
+                    t.status_running.b(),
+                    18,
+                )
             } else {
-                stroke_subtle()
-            },
-        ))
+                t.surface
+            };
+            Frame::default()
+                .fill(fill)
+                .corner_radius(t.corner_radius)
+                .inner_margin(Margin::same(24))
+                .stroke(Stroke::new(
+                    1.0_f32,
+                    if running {
+                        Color32::from_rgba_unmultiplied(
+                            t.status_running.r(),
+                            t.status_running.g(),
+                            t.status_running.b(),
+                            55,
+                        )
+                    } else {
+                        t.stroke_subtle
+                    },
+                ))
+        }
+        AppTheme::Arma3 => Frame::default()
+            .fill(t.surface)
+            .corner_radius(t.corner_radius)
+            .inner_margin(Margin::same(24))
+            .stroke(Stroke::new(
+                1.0_f32,
+                if running {
+                    t.accent
+                } else {
+                    t.stroke_subtle
+                },
+            )),
+    }
 }
 
-/// Nested last-clip strip on Home.
 pub fn home_last_clip_frame() -> Frame {
+    let t = tokens();
     Frame::default()
-        .fill(surface_track())
-        .corner_radius(CORNER_RADIUS)
+        .fill(t.surface_track)
+        .corner_radius(t.corner_radius)
         .inner_margin(Margin::same(10))
-        .stroke(Stroke::new(1.0_f32, stroke_subtle()))
+        .stroke(Stroke::new(1.0_f32, t.stroke_subtle))
 }
 
-/// Compact card for clip grid tiles.
 pub fn card_frame() -> Frame {
+    let t = tokens();
     Frame::default()
-        .fill(surface())
-        .corner_radius(CORNER_RADIUS)
+        .fill(t.surface)
+        .corner_radius(t.corner_radius)
         .inner_margin(Margin::same(14))
-        .stroke(Stroke::new(1.0_f32, stroke_subtle()))
+        .stroke(Stroke::new(1.0_f32, t.stroke_subtle))
 }
 
-/// Emphasized card for the most recently saved clip.
 pub fn card_frame_focused() -> Frame {
+    let t = tokens();
+        let stroke_w = match t.style {
+            AppTheme::Classic => 2.0_f32,
+            AppTheme::Arma3 => 1.0_f32,
+        };
     Frame::default()
-        .fill(surface())
-        .corner_radius(CORNER_RADIUS)
+        .fill(t.surface)
+        .corner_radius(t.corner_radius)
         .inner_margin(Margin::same(14))
-        .stroke(Stroke::new(1.0_f32, accent()))
+        .stroke(Stroke::new(stroke_w, t.accent))
 }
 
 pub fn primary_button(text: &str) -> Button<'static> {
-    Button::new(RichText::new(text).color(text_primary()))
-        .fill(surface_track())
-        .stroke(Stroke::new(1.0_f32, stroke_subtle()))
-        .corner_radius(CORNER_RADIUS)
+    let t = tokens();
+    match t.style {
+        AppTheme::Classic => Button::new(text).fill(t.accent).corner_radius(t.corner_radius),
+        AppTheme::Arma3 => Button::new(RichText::new(text).color(t.text_primary))
+            .fill(t.surface_track)
+            .stroke(Stroke::new(1.0_f32, t.stroke_subtle))
+            .corner_radius(t.corner_radius),
+    }
 }
 
 pub fn secondary_button(text: &str) -> Button<'static> {
-    Button::new(RichText::new(text).color(text_primary()))
-        .fill(surface())
-        .stroke(Stroke::new(1.0_f32, stroke_subtle()))
-        .corner_radius(CORNER_RADIUS)
+    let t = tokens();
+    match t.style {
+        AppTheme::Classic => Button::new(text).corner_radius(t.corner_radius),
+        AppTheme::Arma3 => Button::new(RichText::new(text).color(t.text_primary))
+            .fill(t.surface)
+            .stroke(Stroke::new(1.0_f32, t.stroke_subtle))
+            .corner_radius(t.corner_radius),
+    }
 }
 
-/// Sidebar nav row: orange left bar when selected (no amber wash).
 pub fn nav_item(ui: &mut Ui, label: &str, selected: bool) -> bool {
+    let t = tokens();
     let width = ui.available_width();
     let height = 36.0;
     let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
 
     if ui.is_rect_visible(rect) {
-        if response.hovered() && !selected {
-            ui.painter()
-                .rect_filled(rect, CORNER_RADIUS, Color32::from_rgb(36, 38, 34));
+        match t.style {
+            AppTheme::Classic => {
+                let fill = if selected {
+                    t.accent.gamma_multiply(0.22)
+                } else if response.hovered() {
+                    Color32::from_gray(38)
+                } else {
+                    Color32::TRANSPARENT
+                };
+                if fill != Color32::TRANSPARENT {
+                    ui.painter().rect_filled(rect, 6.0, fill);
+                }
+                let text_color = if selected {
+                    t.accent_bright
+                } else {
+                    Color32::from_gray(180)
+                };
+                ui.painter().text(
+                    rect.left_center() + vec2(12.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(15.0),
+                    text_color,
+                );
+            }
+            AppTheme::Arma3 => {
+                if response.hovered() && !selected {
+                    ui.painter().rect_filled(
+                        rect,
+                        t.corner_radius,
+                        Color32::from_rgb(36, 38, 34),
+                    );
+                }
+                if selected {
+                    let bar = Rect::from_min_size(rect.min, vec2(3.0, rect.height()));
+                    ui.painter().rect_filled(bar, 0.0, t.accent);
+                }
+                let text_color = if selected {
+                    t.text_primary
+                } else {
+                    t.text_muted
+                };
+                ui.painter().text(
+                    rect.left_center() + vec2(14.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(15.0),
+                    text_color,
+                );
+            }
         }
-
-        if selected {
-            let bar = Rect::from_min_size(rect.min, vec2(3.0, rect.height()));
-            ui.painter().rect_filled(bar, 0.0, accent());
-        }
-
-        let text_color = if selected {
-            text_primary()
-        } else {
-            text_muted()
-        };
-        ui.painter().text(
-            rect.left_center() + vec2(14.0, 0.0),
-            Align2::LEFT_CENTER,
-            label,
-            FontId::proportional(15.0),
-            text_color,
-        );
     }
 
     response.clicked()
 }
 
-fn install_fonts(ctx: &Context) {
+fn install_fonts_arma3(ctx: &Context) {
     let mut fonts = FontDefinitions::default();
 
     fonts.font_data.insert(
@@ -201,23 +369,35 @@ fn install_fonts(ctx: &Context) {
     ctx.set_fonts(fonts);
 }
 
-pub fn apply_theme(ctx: &Context) {
-    install_fonts(ctx);
+pub fn apply_theme(ctx: &Context, theme: AppTheme) {
+    set_theme(theme);
 
+    match theme {
+        AppTheme::Classic => ctx.set_fonts(FontDefinitions::default()),
+        AppTheme::Arma3 => install_fonts_arma3(ctx),
+    }
+
+    let t = tokens();
     let mut visuals = Visuals::dark();
-    let radius = CornerRadius::same(CORNER_RADIUS as u8);
+    let radius = CornerRadius::same(t.corner_radius as u8);
     visuals.window_corner_radius = radius;
     visuals.menu_corner_radius = radius;
-    visuals.panel_fill = panel_fill();
-    visuals.extreme_bg_color = extreme_bg();
-    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(28, 30, 26);
+    visuals.panel_fill = t.panel_fill;
+    visuals.extreme_bg_color = t.extreme_bg;
+    visuals.widgets.noninteractive.bg_fill = t.noninteractive_bg;
     visuals.widgets.inactive.corner_radius = radius;
     visuals.widgets.active.corner_radius = radius;
     visuals.widgets.hovered.corner_radius = radius;
-    visuals.widgets.inactive.bg_fill = surface();
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(48, 50, 46);
-    visuals.widgets.active.bg_fill = Color32::from_rgb(52, 54, 50);
-    visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(196, 122, 32, 55);
+    visuals.widgets.inactive.bg_fill = t.surface;
+    visuals.widgets.hovered.bg_fill = t.hover_fill;
+    visuals.widgets.active.bg_fill = match theme {
+        AppTheme::Classic => t.accent.gamma_multiply(0.85),
+        AppTheme::Arma3 => t.active_fill,
+    };
+    visuals.selection.bg_fill = match theme {
+        AppTheme::Classic => t.accent.gamma_multiply(0.35),
+        AppTheme::Arma3 => t.selection_bg,
+    };
     ctx.set_visuals(visuals);
 
     ctx.style_mut(|style| {

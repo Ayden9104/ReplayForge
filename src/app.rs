@@ -4,8 +4,8 @@ use crate::clips::{
     trim_clip, waveform_peak_count,
 };
 use crate::config::{
-    Backend, Config, SystemAudioMode, codec_choices, hotkey_choices, path_display, quality_choices,
-    resolution_choices, set_autostart,
+    AppTheme, Backend, Config, SystemAudioMode, codec_choices, hotkey_choices, path_display,
+    quality_choices, resolution_choices, set_autostart,
 };
 use crate::detect::{
     Detection, clip_duration_secs, format_bytes, format_duration, friendly_audio_app_label,
@@ -260,6 +260,10 @@ impl ReplayForge {
         }
 
         app
+    }
+
+    pub fn apply_configured_theme(&self, ctx: &egui::Context) {
+        theme::apply_theme(ctx, self.config.theme);
     }
 
     fn toast(&mut self, message: impl Into<String>) {
@@ -2998,6 +3002,36 @@ impl ReplayForge {
             ui.add_space(12.0);
 
             theme::section_frame().show(ui, |ui| {
+                ui.heading("Appearance");
+                ui.add_space(8.0);
+                let mut theme_choice = self.config.theme;
+                ui.horizontal(|ui| {
+                    ui.label("Theme");
+                    egui::ComboBox::from_id_salt("app_theme")
+                        .selected_text(theme_choice.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut theme_choice,
+                                AppTheme::Classic,
+                                AppTheme::Classic.label(),
+                            );
+                            ui.selectable_value(
+                                &mut theme_choice,
+                                AppTheme::Arma3,
+                                AppTheme::Arma3.label(),
+                            );
+                        });
+                });
+                if theme_choice != self.config.theme {
+                    self.config.theme = theme_choice;
+                    self.persist_config();
+                    theme::apply_theme(ui.ctx(), self.config.theme);
+                }
+            });
+
+            ui.add_space(12.0);
+
+            theme::section_frame().show(ui, |ui| {
                 ui.heading("Desktop");
                 ui.add_space(8.0);
                 if ui
@@ -3435,7 +3469,7 @@ impl ReplayForge {
                     ui.vertical_centered(|ui| {
                         let preview_frame = egui::Frame::default()
                             .fill(theme::surface_track())
-                            .corner_radius(theme::CORNER_RADIUS);
+                            .corner_radius(theme::corner_radius());
 
                         preview_frame.show(ui, |ui| {
                             ui.set_width(preview_width);

@@ -80,6 +80,23 @@ fn resolution_pixel_area(resolution: &str) -> Option<f64> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AppTheme {
+    #[default]
+    Classic,
+    Arma3,
+}
+
+impl AppTheme {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Classic => "Classic",
+            Self::Arma3 => "ArmA 3",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub output_dir: PathBuf,
@@ -129,6 +146,9 @@ pub struct Config {
     /// Base URL of the share Worker (empty disables Share).
     #[serde(default = "default_share_api_base")]
     pub share_api_base: String,
+    /// UI theme (Classic blue utility or ArmA 3 chrome).
+    #[serde(default)]
+    pub theme: AppTheme,
     pub first_run_complete: bool,
 }
 
@@ -174,6 +194,7 @@ impl Default for Config {
             sfx_volume: default_sfx_volume(),
             clip_ready_notify_critical: true,
             share_api_base: default_share_api_base(),
+            theme: AppTheme::Classic,
             first_run_complete: false,
         }
     }
