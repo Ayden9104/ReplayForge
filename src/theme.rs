@@ -1,4 +1,4 @@
-//! Shared UI colors and egui theme chrome (Classic + ArmA 3).
+//! Shared UI colors and egui theme chrome (Classic, ArmA 3, Night Ops).
 use crate::config::AppTheme;
 use eframe::egui::{
     Align2, Button, Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
@@ -32,6 +32,10 @@ struct ThemeTokens {
     active_fill: Color32,
     noninteractive_bg: Color32,
     selection_bg: Color32,
+}
+
+fn uses_flat_chrome(style: AppTheme) -> bool {
+    matches!(style, AppTheme::Arma3 | AppTheme::NightOps)
 }
 
 fn classic_tokens() -> ThemeTokens {
@@ -88,6 +92,33 @@ fn arma3_tokens() -> ThemeTokens {
     }
 }
 
+fn night_ops_tokens() -> ThemeTokens {
+    ThemeTokens {
+        style: AppTheme::NightOps,
+        corner_radius: 3.0,
+        accent: Color32::from_rgb(78, 180, 220),
+        accent_bright: Color32::from_rgb(120, 210, 240),
+        surface: Color32::from_rgb(22, 26, 32),
+        surface_track: Color32::from_rgb(28, 34, 42),
+        surface_dim: Color32::from_rgba_unmultiplied(8, 10, 14, 200),
+        keep_tint: Color32::from_rgba_unmultiplied(78, 180, 220, 28),
+        text_primary: Color32::from_rgb(220, 228, 236),
+        text_muted: Color32::from_rgb(130, 140, 152),
+        text_muted_light: Color32::from_rgb(150, 160, 172),
+        error: Color32::from_rgb(200, 80, 90),
+        button_disabled: Color32::from_rgb(40, 46, 54),
+        status_running: Color32::from_rgb(200, 208, 216),
+        success: Color32::from_rgb(70, 140, 120),
+        stroke_subtle: Color32::from_rgb(48, 56, 68),
+        panel_fill: Color32::from_rgb(12, 14, 18),
+        extreme_bg: Color32::from_rgb(8, 10, 14),
+        hover_fill: Color32::from_rgb(36, 44, 54),
+        active_fill: Color32::from_rgb(40, 48, 58),
+        noninteractive_bg: Color32::from_rgb(18, 22, 28),
+        selection_bg: Color32::from_rgba_unmultiplied(78, 180, 220, 55),
+    }
+}
+
 fn set_theme(theme: AppTheme) {
     if let Ok(mut guard) = ACTIVE.lock() {
         *guard = theme;
@@ -99,6 +130,7 @@ fn tokens() -> ThemeTokens {
     match theme {
         AppTheme::Classic => classic_tokens(),
         AppTheme::Arma3 => arma3_tokens(),
+        AppTheme::NightOps => night_ops_tokens(),
     }
 }
 
@@ -178,37 +210,8 @@ pub fn section_frame() -> Frame {
 
 pub fn home_section_frame(running: bool) -> Frame {
     let t = tokens();
-    match t.style {
-        AppTheme::Classic => {
-            let fill = if running {
-                Color32::from_rgba_unmultiplied(
-                    t.status_running.r(),
-                    t.status_running.g(),
-                    t.status_running.b(),
-                    18,
-                )
-            } else {
-                t.surface
-            };
-            Frame::default()
-                .fill(fill)
-                .corner_radius(t.corner_radius)
-                .inner_margin(Margin::same(24))
-                .stroke(Stroke::new(
-                    1.0_f32,
-                    if running {
-                        Color32::from_rgba_unmultiplied(
-                            t.status_running.r(),
-                            t.status_running.g(),
-                            t.status_running.b(),
-                            55,
-                        )
-                    } else {
-                        t.stroke_subtle
-                    },
-                ))
-        }
-        AppTheme::Arma3 => Frame::default()
+    if uses_flat_chrome(t.style) {
+        return Frame::default()
             .fill(t.surface)
             .corner_radius(t.corner_radius)
             .inner_margin(Margin::same(24))
@@ -219,8 +222,36 @@ pub fn home_section_frame(running: bool) -> Frame {
                 } else {
                     t.stroke_subtle
                 },
-            )),
+            ));
     }
+
+    let fill = if running {
+        Color32::from_rgba_unmultiplied(
+            t.status_running.r(),
+            t.status_running.g(),
+            t.status_running.b(),
+            18,
+        )
+    } else {
+        t.surface
+    };
+    Frame::default()
+        .fill(fill)
+        .corner_radius(t.corner_radius)
+        .inner_margin(Margin::same(24))
+        .stroke(Stroke::new(
+            1.0_f32,
+            if running {
+                Color32::from_rgba_unmultiplied(
+                    t.status_running.r(),
+                    t.status_running.g(),
+                    t.status_running.b(),
+                    55,
+                )
+            } else {
+                t.stroke_subtle
+            },
+        ))
 }
 
 pub fn home_last_clip_frame() -> Frame {
@@ -243,10 +274,11 @@ pub fn card_frame() -> Frame {
 
 pub fn card_frame_focused() -> Frame {
     let t = tokens();
-        let stroke_w = match t.style {
-            AppTheme::Classic => 2.0_f32,
-            AppTheme::Arma3 => 1.0_f32,
-        };
+    let stroke_w = if uses_flat_chrome(t.style) {
+        1.0_f32
+    } else {
+        2.0_f32
+    };
     Frame::default()
         .fill(t.surface)
         .corner_radius(t.corner_radius)
@@ -256,23 +288,25 @@ pub fn card_frame_focused() -> Frame {
 
 pub fn primary_button(text: &str) -> Button<'static> {
     let t = tokens();
-    match t.style {
-        AppTheme::Classic => Button::new(text).fill(t.accent).corner_radius(t.corner_radius),
-        AppTheme::Arma3 => Button::new(RichText::new(text).color(t.text_primary))
+    if uses_flat_chrome(t.style) {
+        Button::new(RichText::new(text).color(t.text_primary))
             .fill(t.surface_track)
             .stroke(Stroke::new(1.0_f32, t.stroke_subtle))
-            .corner_radius(t.corner_radius),
+            .corner_radius(t.corner_radius)
+    } else {
+        Button::new(text).fill(t.accent).corner_radius(t.corner_radius)
     }
 }
 
 pub fn secondary_button(text: &str) -> Button<'static> {
     let t = tokens();
-    match t.style {
-        AppTheme::Classic => Button::new(text).corner_radius(t.corner_radius),
-        AppTheme::Arma3 => Button::new(RichText::new(text).color(t.text_primary))
+    if uses_flat_chrome(t.style) {
+        Button::new(RichText::new(text).color(t.text_primary))
             .fill(t.surface)
             .stroke(Stroke::new(1.0_f32, t.stroke_subtle))
-            .corner_radius(t.corner_radius),
+            .corner_radius(t.corner_radius)
+    } else {
+        Button::new(text).corner_radius(t.corner_radius)
     }
 }
 
@@ -283,63 +317,57 @@ pub fn nav_item(ui: &mut Ui, label: &str, selected: bool) -> bool {
     let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click());
 
     if ui.is_rect_visible(rect) {
-        match t.style {
-            AppTheme::Classic => {
-                let fill = if selected {
-                    t.accent.gamma_multiply(0.22)
-                } else if response.hovered() {
-                    Color32::from_gray(38)
-                } else {
-                    Color32::TRANSPARENT
-                };
-                if fill != Color32::TRANSPARENT {
-                    ui.painter().rect_filled(rect, 6.0, fill);
-                }
-                let text_color = if selected {
-                    t.accent_bright
-                } else {
-                    Color32::from_gray(180)
-                };
-                ui.painter().text(
-                    rect.left_center() + vec2(12.0, 0.0),
-                    Align2::LEFT_CENTER,
-                    label,
-                    FontId::proportional(15.0),
-                    text_color,
-                );
+        if uses_flat_chrome(t.style) {
+            if response.hovered() && !selected {
+                ui.painter()
+                    .rect_filled(rect, t.corner_radius, t.hover_fill);
             }
-            AppTheme::Arma3 => {
-                if response.hovered() && !selected {
-                    ui.painter().rect_filled(
-                        rect,
-                        t.corner_radius,
-                        Color32::from_rgb(36, 38, 34),
-                    );
-                }
-                if selected {
-                    let bar = Rect::from_min_size(rect.min, vec2(3.0, rect.height()));
-                    ui.painter().rect_filled(bar, 0.0, t.accent);
-                }
-                let text_color = if selected {
-                    t.text_primary
-                } else {
-                    t.text_muted
-                };
-                ui.painter().text(
-                    rect.left_center() + vec2(14.0, 0.0),
-                    Align2::LEFT_CENTER,
-                    label,
-                    FontId::proportional(15.0),
-                    text_color,
-                );
+            if selected {
+                let bar = Rect::from_min_size(rect.min, vec2(3.0, rect.height()));
+                ui.painter().rect_filled(bar, 0.0, t.accent);
             }
+            let text_color = if selected {
+                t.text_primary
+            } else {
+                t.text_muted
+            };
+            ui.painter().text(
+                rect.left_center() + vec2(14.0, 0.0),
+                Align2::LEFT_CENTER,
+                label,
+                FontId::proportional(15.0),
+                text_color,
+            );
+        } else {
+            let fill = if selected {
+                t.accent.gamma_multiply(0.22)
+            } else if response.hovered() {
+                Color32::from_gray(38)
+            } else {
+                Color32::TRANSPARENT
+            };
+            if fill != Color32::TRANSPARENT {
+                ui.painter().rect_filled(rect, 6.0, fill);
+            }
+            let text_color = if selected {
+                t.accent_bright
+            } else {
+                Color32::from_gray(180)
+            };
+            ui.painter().text(
+                rect.left_center() + vec2(12.0, 0.0),
+                Align2::LEFT_CENTER,
+                label,
+                FontId::proportional(15.0),
+                text_color,
+            );
         }
     }
 
     response.clicked()
 }
 
-fn install_fonts_arma3(ctx: &Context) {
+fn install_fonts_condensed(ctx: &Context) {
     let mut fonts = FontDefinitions::default();
 
     fonts.font_data.insert(
@@ -372,9 +400,10 @@ fn install_fonts_arma3(ctx: &Context) {
 pub fn apply_theme(ctx: &Context, theme: AppTheme) {
     set_theme(theme);
 
-    match theme {
-        AppTheme::Classic => ctx.set_fonts(FontDefinitions::default()),
-        AppTheme::Arma3 => install_fonts_arma3(ctx),
+    if uses_flat_chrome(theme) {
+        install_fonts_condensed(ctx);
+    } else {
+        ctx.set_fonts(FontDefinitions::default());
     }
 
     let t = tokens();
@@ -390,13 +419,15 @@ pub fn apply_theme(ctx: &Context, theme: AppTheme) {
     visuals.widgets.hovered.corner_radius = radius;
     visuals.widgets.inactive.bg_fill = t.surface;
     visuals.widgets.hovered.bg_fill = t.hover_fill;
-    visuals.widgets.active.bg_fill = match theme {
-        AppTheme::Classic => t.accent.gamma_multiply(0.85),
-        AppTheme::Arma3 => t.active_fill,
+    visuals.widgets.active.bg_fill = if uses_flat_chrome(theme) {
+        t.active_fill
+    } else {
+        t.accent.gamma_multiply(0.85)
     };
-    visuals.selection.bg_fill = match theme {
-        AppTheme::Classic => t.accent.gamma_multiply(0.35),
-        AppTheme::Arma3 => t.selection_bg,
+    visuals.selection.bg_fill = if uses_flat_chrome(theme) {
+        t.selection_bg
+    } else {
+        t.accent.gamma_multiply(0.35)
     };
     ctx.set_visuals(visuals);
 

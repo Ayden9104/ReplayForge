@@ -86,6 +86,7 @@ pub enum AppTheme {
     #[default]
     Classic,
     Arma3,
+    NightOps,
 }
 
 impl AppTheme {
@@ -93,6 +94,7 @@ impl AppTheme {
         match self {
             Self::Classic => "Classic",
             Self::Arma3 => "ArmA 3",
+            Self::NightOps => "Night Ops",
         }
     }
 }

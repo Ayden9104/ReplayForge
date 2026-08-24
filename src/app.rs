@@ -3020,6 +3020,11 @@ impl ReplayForge {
                                 AppTheme::Arma3,
                                 AppTheme::Arma3.label(),
                             );
+                            ui.selectable_value(
+                                &mut theme_choice,
+                                AppTheme::NightOps,
+                                AppTheme::NightOps.label(),
+                            );
                         });
                 });
                 if theme_choice != self.config.theme {
