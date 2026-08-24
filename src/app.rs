@@ -147,6 +147,8 @@ pub struct ReplayForge {
     tray_retry_at: Option<Instant>,
     clip_sort: ClipSort,
     clip_filter: String,
+    /// Clip + thumbnail paths awaiting delete confirmation.
+    pending_delete: Option<(PathBuf, PathBuf)>,
 }
 
 impl ReplayForge {
@@ -250,6 +252,7 @@ impl ReplayForge {
             tray_retry_at,
             clip_sort: ClipSort::Newest,
             clip_filter: String::new(),
+            pending_delete: None,
         };
 
         if app.config.auto_start_replay && !app.show_first_run {
@@ -1559,6 +1562,8 @@ impl eframe::App for ReplayForge {
             Page::Settings => self.ui_settings(ui),
             Page::Trim => {}
         });
+
+        self.ui_delete_confirm(ctx);
     }
 }
 
@@ -1663,13 +1668,10 @@ impl ReplayForge {
         let mut copy_last = false;
         let mut go_settings = false;
 
-        // Center the command card in the content pane.
-        ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height().max(0.0) * 0.08);
-
-            theme::home_section_frame(replay_running).show(ui, |ui| {
-                ui.set_width(520.0);
-                let card_w = ui.available_width();
+        ui.add_space(20.0);
+        theme::home_section_frame(replay_running).show(ui, |ui| {
+            ui.set_max_width(480.0);
+            let card_w = ui.available_width();
 
                 if let Some(error) = &last_error {
                     ui.colored_label(
@@ -1767,7 +1769,7 @@ impl ReplayForge {
                     );
                 }
 
-                ui.add_space(16.0);
+                ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(format!(
@@ -1794,7 +1796,7 @@ impl ReplayForge {
                     });
                 });
 
-                ui.add_space(18.0);
+                ui.add_space(14.0);
 
                 if replay_running {
                     let save_label = if self.saving {
@@ -1826,7 +1828,7 @@ impl ReplayForge {
                 }
 
                 if let Some(ref clip_path) = last_clip {
-                    ui.add_space(20.0);
+                    ui.add_space(14.0);
                     ui.label(
                         egui::RichText::new("Last clip")
                             .size(11.0)
@@ -1848,7 +1850,7 @@ impl ReplayForge {
 
                     theme::home_last_clip_frame().show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            let thumb_size = egui::vec2(96.0, 54.0);
+                            let thumb_size = egui::vec2(80.0, 45.0);
                             if let Some(texture) = self.textures.get(&thumb_path) {
                                 let response = ui.add(
                                     egui::Image::new(texture)
@@ -1914,7 +1916,6 @@ impl ReplayForge {
                         });
                     });
                 }
-            });
         });
 
         if go_settings {
@@ -2186,7 +2187,6 @@ impl ReplayForge {
         let mut share_copy_req: Option<PathBuf> = None;
         let mut share_new_req: Option<PathBuf> = None;
         let mut start_trim_req: Option<PathBuf> = None;
-        let mut delete_req: Option<(PathBuf, PathBuf)> = None;
         let mut start_rename: Option<PathBuf> = None;
         let mut finish_rename: Option<(PathBuf, String)> = None;
         let mut cancel_rename = false;
@@ -2433,7 +2433,7 @@ impl ReplayForge {
                                             start_trim_req = Some(clip_path.clone());
                                         }
                                         if ui.button("Delete").clicked() {
-                                            delete_req =
+                                            self.pending_delete =
                                                 Some((clip_path.clone(), thumbnail_path.clone()));
                                         }
                                     });
@@ -2525,8 +2525,64 @@ impl ReplayForge {
             }
             self.rename = None;
         }
+    }
 
-        if let Some((clip_path, thumbnail_path)) = delete_req {
+    fn ui_delete_confirm(&mut self, ctx: &egui::Context) {
+        let Some((clip_path, thumbnail_path)) = self.pending_delete.clone() else {
+            return;
+        };
+
+        let name = clip_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("clip");
+
+        let mut confirm = false;
+        let mut cancel = false;
+
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+
+        let screen = ctx.screen_rect();
+        egui::Area::new(egui::Id::new("delete_confirm_dim"))
+            .fixed_pos(screen.min)
+            .order(egui::Order::Middle)
+            .sense(egui::Sense::click())
+            .show(ctx, |ui| {
+                ui.painter()
+                    .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
+                let response = ui.allocate_response(screen.size(), egui::Sense::click());
+                if response.clicked() {
+                    cancel = true;
+                }
+            });
+
+        egui::Window::new("Delete clip?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!("Delete \"{name}\"? This cannot be undone."));
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.add(theme::secondary_button("Cancel")).clicked() {
+                        cancel = true;
+                    }
+                    if ui.button(
+                        egui::RichText::new("Delete").color(theme::error()),
+                    )
+                    .clicked()
+                    {
+                        confirm = true;
+                    }
+                });
+            });
+
+        if cancel {
+            self.pending_delete = None;
+        } else if confirm {
+            self.pending_delete = None;
             if let Err(error) = fs::remove_file(&clip_path) {
                 self.toast(format!("Failed to delete clip: {error}"));
             } else {

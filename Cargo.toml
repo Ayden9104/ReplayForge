@@ -1,6 +1,6 @@
 [package]
 name = "replayforge"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2024"
 description = "Bare-bones Medal-like instant replay for Linux"
 license = "MIT"
