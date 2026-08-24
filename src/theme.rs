@@ -83,6 +83,15 @@ pub fn home_section_frame(running: bool) -> Frame {
         ))
 }
 
+/// Nested last-clip strip on Home.
+pub fn home_last_clip_frame() -> Frame {
+    Frame::default()
+        .fill(surface_track())
+        .corner_radius(CORNER_RADIUS)
+        .inner_margin(Margin::same(10))
+        .stroke(Stroke::new(1.0_f32, stroke_subtle()))
+}
+
 /// Compact card for clip grid tiles.
 pub fn card_frame() -> Frame {
     Frame::default()
