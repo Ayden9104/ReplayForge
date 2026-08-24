@@ -1684,11 +1684,11 @@ impl ReplayForge {
             // Hero status
             ui.horizontal(|ui| {
                 let (status_color, status_text) = if self.saving {
-                    (theme::accent(), "Saving clip…")
+                    (theme::accent_bright(), "Saving clip…")
                 } else if replay_running {
                     let t = ui.input(|i| i.time);
                     let pulse =
-                        0.35 + 0.65 * (0.5 + 0.5 * (t * std::f64::consts::TAU * 1.1).sin()) as f32;
+                        0.45 + 0.55 * (0.5 + 0.5 * (t * std::f64::consts::TAU * 1.1).sin()) as f32;
                     let base = theme::status_running();
                     (
                         egui::Color32::from_rgba_unmultiplied(
@@ -1705,25 +1705,14 @@ impl ReplayForge {
                 let (dot_rect, _) =
                     ui.allocate_exact_size(egui::vec2(22.0, 30.0), egui::Sense::hover());
                 let c = dot_rect.center();
-                if replay_running && !self.saving {
-                    let ring = theme::status_running();
-                    ui.painter().circle_stroke(
-                        c,
-                        11.0,
-                        egui::Stroke::new(
-                            2.0_f32,
-                            egui::Color32::from_rgba_unmultiplied(ring.r(), ring.g(), ring.b(), 70),
-                        ),
-                    );
-                }
-                ui.painter().circle_filled(c, 7.0, status_color);
+                ui.painter().circle_filled(c, 6.0, status_color);
                 ui.label(egui::RichText::new(status_text).size(26.0).strong().color(
-                    if replay_running && !self.saving {
-                        theme::status_running()
-                    } else if self.saving {
+                    if self.saving {
                         theme::accent_bright()
+                    } else if replay_running {
+                        theme::text_primary()
                     } else {
-                        egui::Color32::from_gray(210)
+                        theme::text_muted()
                     },
                 ));
             });
@@ -1735,7 +1724,7 @@ impl ReplayForge {
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new(format!("Press {} to save", self.config.hotkey))
-                        .color(theme::status_running())
+                        .color(theme::text_muted())
                         .size(14.0),
                 );
             } else {
@@ -2347,7 +2336,7 @@ impl ReplayForge {
                                             }
                                             let copy_btn = if copy_flash_active {
                                                 theme::primary_button("Copied")
-                                                    .fill(theme::status_running())
+                                                    .fill(theme::success())
                                             } else {
                                                 theme::primary_button("Copy link")
                                             };
@@ -3184,7 +3173,7 @@ impl ReplayForge {
                 } else if using_cloud {
                     ui.label(
                         egui::RichText::new("Using ReplayForge cloud (Cloudflare).")
-                            .color(theme::status_running()),
+                            .color(theme::success()),
                     );
                 } else {
                     ui.label(
@@ -3267,7 +3256,7 @@ impl ReplayForge {
                     ui.add_space(6.0);
                     ui.label(
                         egui::RichText::new(format!("v{} is ready to install", pending.latest))
-                            .color(theme::status_running()),
+                            .color(theme::success()),
                     );
                     ui.horizontal(|ui| {
                         if ui
