@@ -1685,53 +1685,80 @@ impl ReplayForge {
                 ui.add_space(10.0);
             }
 
-            // Hero status
-            ui.horizontal(|ui| {
-                let (status_color, status_text) = if self.saving {
-                    (theme::accent_bright(), "Saving clip…")
-                } else if replay_running {
-                    let t = ui.input(|i| i.time);
-                    let pulse =
-                        0.45 + 0.55 * (0.5 + 0.5 * (t * std::f64::consts::TAU * 1.1).sin()) as f32;
-                    let base = theme::status_running();
-                    (
-                        egui::Color32::from_rgba_unmultiplied(
-                            base.r(),
-                            base.g(),
-                            base.b(),
-                            (pulse * 255.0) as u8,
-                        ),
-                        "Replay running",
-                    )
-                } else {
-                    (theme::text_muted(), "Replay stopped")
-                };
-                let (dot_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(22.0, 30.0), egui::Sense::hover());
-                let c = dot_rect.center();
-                ui.painter().circle_filled(c, 6.0, status_color);
-                ui.label(egui::RichText::new(status_text).size(26.0).strong().color(
-                    if self.saving {
-                        theme::accent_bright()
-                    } else if replay_running {
-                        theme::text_primary()
-                    } else {
-                        theme::text_muted()
-                    },
-                ));
-            });
-
+            // Status + hero
             if self.saving {
-                // no invite line
+                ui.horizontal(|ui| {
+                    let (dot_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(22.0, 28.0), egui::Sense::hover());
+                    ui.painter()
+                        .circle_filled(dot_rect.center(), 6.0, theme::accent_bright());
+                    ui.label(
+                        egui::RichText::new("Saving clip…")
+                            .size(22.0)
+                            .strong()
+                            .color(theme::accent_bright()),
+                    );
+                });
             } else if replay_running {
                 ui.ctx().request_repaint_after(Duration::from_millis(33));
+                ui.horizontal(|ui| {
+                    let t = ui.input(|i| i.time);
+                    let pulse = 0.45
+                        + 0.55 * (0.5 + 0.5 * (t * std::f64::consts::TAU * 1.1).sin()) as f32;
+                    let base = theme::status_running();
+                    let status_color = egui::Color32::from_rgba_unmultiplied(
+                        base.r(),
+                        base.g(),
+                        base.b(),
+                        (pulse * 255.0) as u8,
+                    );
+                    let (dot_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(18.0, 22.0), egui::Sense::hover());
+                    ui.painter()
+                        .circle_filled(dot_rect.center(), 5.0, status_color);
+                    ui.label(
+                        egui::RichText::new("Live")
+                            .size(13.0)
+                            .color(theme::text_muted()),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{}", self.config.buffer_seconds))
+                            .size(44.0)
+                            .strong()
+                            .color(theme::text_primary()),
+                    );
+                    ui.add_space(6.0);
+                    ui.vertical(|ui| {
+                        ui.add_space(14.0);
+                        ui.label(
+                            egui::RichText::new("s buffer")
+                                .size(14.0)
+                                .color(theme::text_muted()),
+                        );
+                    });
+                });
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new(format!("Press {} to save", self.config.hotkey))
                         .color(theme::text_muted())
-                        .size(14.0),
+                        .size(12.0),
                 );
             } else {
+                ui.horizontal(|ui| {
+                    let (dot_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(22.0, 28.0), egui::Sense::hover());
+                    ui.painter()
+                        .circle_filled(dot_rect.center(), 6.0, theme::text_muted());
+                    ui.label(
+                        egui::RichText::new("Ready")
+                            .size(22.0)
+                            .strong()
+                            .color(theme::text_muted()),
+                    );
+                });
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new("Ready when you are")
@@ -1756,13 +1783,18 @@ impl ReplayForge {
 
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(format!(
+                let summary = if replay_running && !self.saving {
+                    format!("{} · {} FPS", self.config.display, self.config.fps)
+                } else {
+                    format!(
                         "{} · {} FPS · {}s",
                         self.config.display, self.config.fps, self.config.buffer_seconds
-                    ))
-                    .color(theme::text_muted())
-                    .size(12.0),
+                    )
+                };
+                ui.label(
+                    egui::RichText::new(summary)
+                        .color(theme::text_muted())
+                        .size(12.0),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
@@ -3007,29 +3039,29 @@ impl ReplayForge {
                 let mut theme_choice = self.config.theme;
                 ui.horizontal(|ui| {
                     ui.label("Theme");
+                    theme::paint_swatch(ui, theme::swatch_colors(theme_choice));
                     egui::ComboBox::from_id_salt("app_theme")
                         .selected_text(theme_choice.label())
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut theme_choice,
+                            for option in [
                                 AppTheme::Classic,
-                                AppTheme::Classic.label(),
-                            );
-                            ui.selectable_value(
-                                &mut theme_choice,
                                 AppTheme::Arma3,
-                                AppTheme::Arma3.label(),
-                            );
-                            ui.selectable_value(
-                                &mut theme_choice,
                                 AppTheme::NightOps,
-                                AppTheme::NightOps.label(),
-                            );
-                            ui.selectable_value(
-                                &mut theme_choice,
                                 AppTheme::Pirate,
-                                AppTheme::Pirate.label(),
-                            );
+                            ] {
+                                ui.horizontal(|ui| {
+                                    theme::paint_swatch(ui, theme::swatch_colors(option));
+                                    if ui
+                                        .selectable_label(
+                                            theme_choice == option,
+                                            option.label(),
+                                        )
+                                        .clicked()
+                                    {
+                                        theme_choice = option;
+                                    }
+                                });
+                            }
                         });
                 });
                 if theme_choice != self.config.theme {

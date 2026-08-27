@@ -2,7 +2,7 @@
 use crate::config::AppTheme;
 use eframe::egui::{
     Align2, Button, Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
-    Frame, Margin, Rect, RichText, Sense, Stroke, Ui, Visuals, vec2,
+    Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Visuals, vec2,
 };
 use std::sync::Mutex;
 
@@ -229,6 +229,49 @@ pub fn stroke_subtle() -> Color32 {
 
 pub fn panel_fill() -> Color32 {
     tokens().panel_fill
+}
+
+/// Panel / accent / accent_bright chips for Appearance picker (does not depend on active theme).
+pub fn swatch_colors(theme: AppTheme) -> [Color32; 3] {
+    match theme {
+        AppTheme::Classic => [
+            Color32::from_gray(25),
+            Color32::from_rgb(70, 130, 220),
+            Color32::from_rgb(100, 200, 255),
+        ],
+        AppTheme::Arma3 => [
+            Color32::from_rgb(32, 34, 30),
+            Color32::from_rgb(196, 122, 32),
+            Color32::from_rgb(224, 144, 48),
+        ],
+        AppTheme::NightOps => [
+            Color32::from_rgb(22, 26, 32),
+            Color32::from_rgb(78, 180, 220),
+            Color32::from_rgb(120, 210, 240),
+        ],
+        AppTheme::Pirate => [
+            Color32::from_rgb(42, 28, 20),
+            Color32::from_rgb(212, 175, 55),
+            Color32::from_rgb(240, 208, 96),
+        ],
+    }
+}
+
+pub fn paint_swatch(ui: &mut Ui, colors: [Color32; 3]) {
+    let size = vec2(10.0, 10.0);
+    let gap = 3.0;
+    let total = vec2(size.x * 3.0 + gap * 2.0, size.y);
+    let (rect, _) = ui.allocate_exact_size(total, Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let stroke = Stroke::new(1.0_f32, stroke_subtle());
+    for (i, color) in colors.iter().enumerate() {
+        let x = rect.min.x + i as f32 * (size.x + gap);
+        let r = Rect::from_min_size(Pos2::new(x, rect.min.y), size);
+        ui.painter().rect_filled(r, 2.0, *color);
+        ui.painter().rect_stroke(r, 2.0, stroke, StrokeKind::Outside);
+    }
 }
 
 pub fn section_frame() -> Frame {
