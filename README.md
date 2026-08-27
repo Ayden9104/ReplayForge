@@ -4,7 +4,7 @@ Medal-style **instant replay** for Linux.
 
 It keeps a short rolling buffer with [GPU Screen Recorder](https://git.dec05eba.com/gpu-screen-recorder/). Hit a hotkey to save the last N seconds, then open, trim, or share clips from a simple desktop app.
 
-Latest release: [v0.1.18](https://github.com/Ayden9104/ReplayForge/releases/tag/v0.1.18)
+Latest release: [v0.1.19](https://github.com/Ayden9104/ReplayForge/releases/tag/v0.1.19)
 
 ## What you get
 
@@ -24,12 +24,12 @@ Latest release: [v0.1.18](https://github.com/Ayden9104/ReplayForge/releases/tag/
 
 ### Download (recommended)
 
-1. Grab `replayforge-0.1.18-linux-x86_64.tar.gz` from the [latest release](https://github.com/Ayden9104/ReplayForge/releases/tag/v0.1.18).
+1. Grab `replayforge-0.1.19-linux-x86_64.tar.gz` from the [latest release](https://github.com/Ayden9104/ReplayForge/releases/tag/v0.1.19).
 2. Extract and install:
 
 ```bash
-tar -xzf replayforge-0.1.18-linux-x86_64.tar.gz
-cd replayforge-0.1.18-linux-x86_64
+tar -xzf replayforge-0.1.19-linux-x86_64.tar.gz
+cd replayforge-0.1.19-linux-x86_64
 ./install.sh
 ```
 
@@ -46,7 +46,7 @@ PREFIX=/opt/replayforge ./install.sh
 If you already cloned the repo, you can install a downloaded archive with:
 
 ```bash
-./scripts/install-bin.sh ~/Downloads/replayforge-0.1.18-linux-x86_64.tar.gz
+./scripts/install-bin.sh ~/Downloads/replayforge-0.1.19-linux-x86_64.tar.gz
 ```
 
 ### Build from source

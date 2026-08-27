@@ -126,26 +126,27 @@ fn pirate_tokens() -> ThemeTokens {
     ThemeTokens {
         style: AppTheme::Pirate,
         corner_radius: 3.0,
-        accent: Color32::from_rgb(196, 163, 90),
-        accent_bright: Color32::from_rgb(220, 190, 120),
-        surface: Color32::from_rgb(36, 30, 24),
-        surface_track: Color32::from_rgb(44, 38, 30),
-        surface_dim: Color32::from_rgba_unmultiplied(14, 12, 10, 200),
-        keep_tint: Color32::from_rgba_unmultiplied(196, 163, 90, 28),
-        text_primary: Color32::from_rgb(232, 224, 208),
-        text_muted: Color32::from_rgb(150, 140, 120),
-        text_muted_light: Color32::from_rgb(170, 160, 140),
-        error: Color32::from_rgb(180, 60, 50),
-        button_disabled: Color32::from_rgb(50, 44, 36),
-        status_running: Color32::from_rgb(200, 192, 176),
-        success: Color32::from_rgb(90, 140, 110),
-        stroke_subtle: Color32::from_rgb(64, 56, 44),
-        panel_fill: Color32::from_rgb(26, 22, 18),
-        extreme_bg: Color32::from_rgb(18, 16, 12),
-        hover_fill: Color32::from_rgb(48, 40, 32),
-        active_fill: Color32::from_rgb(52, 44, 36),
-        noninteractive_bg: Color32::from_rgb(30, 26, 20),
-        selection_bg: Color32::from_rgba_unmultiplied(196, 163, 90, 55),
+        // Metallic gold: classic #D4AF37 base + bright highlight.
+        accent: Color32::from_rgb(212, 175, 55),
+        accent_bright: Color32::from_rgb(240, 208, 96),
+        surface: Color32::from_rgb(42, 28, 20),
+        surface_track: Color32::from_rgb(52, 36, 26),
+        surface_dim: Color32::from_rgba_unmultiplied(10, 8, 6, 200),
+        keep_tint: Color32::from_rgba_unmultiplied(212, 175, 55, 36),
+        text_primary: Color32::from_rgb(242, 230, 200),
+        text_muted: Color32::from_rgb(160, 148, 128),
+        text_muted_light: Color32::from_rgb(180, 168, 148),
+        error: Color32::from_rgb(168, 28, 28),
+        button_disabled: Color32::from_rgb(48, 36, 28),
+        status_running: Color32::from_rgb(61, 155, 143),
+        success: Color32::from_rgb(70, 140, 120),
+        stroke_subtle: Color32::from_rgb(72, 52, 38),
+        panel_fill: Color32::from_rgb(22, 16, 12),
+        extreme_bg: Color32::from_rgb(14, 12, 10),
+        hover_fill: Color32::from_rgb(58, 40, 30),
+        active_fill: Color32::from_rgb(62, 44, 32),
+        noninteractive_bg: Color32::from_rgb(28, 20, 14),
+        selection_bg: Color32::from_rgba_unmultiplied(212, 175, 55, 70),
     }
 }
 
@@ -426,13 +427,45 @@ fn install_fonts_condensed(ctx: &Context) {
     ctx.set_fonts(fonts);
 }
 
+fn install_fonts_pirate_serif(ctx: &Context) {
+    let mut fonts = FontDefinitions::default();
+
+    fonts.font_data.insert(
+        "LibreBaskerville".to_owned(),
+        FontData::from_owned(
+            include_bytes!("../assets/fonts/LibreBaskerville-Regular.ttf").to_vec(),
+        )
+        .into(),
+    );
+    fonts.font_data.insert(
+        "LibreBaskervilleBold".to_owned(),
+        FontData::from_owned(
+            include_bytes!("../assets/fonts/LibreBaskerville-Bold.ttf").to_vec(),
+        )
+        .into(),
+    );
+
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(0, "LibreBaskerville".to_owned());
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(1, "LibreBaskervilleBold".to_owned());
+
+    ctx.set_fonts(fonts);
+}
+
 pub fn apply_theme(ctx: &Context, theme: AppTheme) {
     set_theme(theme);
 
-    if uses_flat_chrome(theme) {
-        install_fonts_condensed(ctx);
-    } else {
-        ctx.set_fonts(FontDefinitions::default());
+    match theme {
+        AppTheme::Classic => ctx.set_fonts(FontDefinitions::default()),
+        AppTheme::Arma3 | AppTheme::NightOps => install_fonts_condensed(ctx),
+        AppTheme::Pirate => install_fonts_pirate_serif(ctx),
     }
 
     let t = tokens();
