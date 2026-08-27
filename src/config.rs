@@ -87,6 +87,7 @@ pub enum AppTheme {
     Classic,
     Arma3,
     NightOps,
+    Pirate,
 }
 
 impl AppTheme {
@@ -95,6 +96,7 @@ impl AppTheme {
             Self::Classic => "Classic",
             Self::Arma3 => "ArmA 3",
             Self::NightOps => "Night Ops",
+            Self::Pirate => "Pirate",
         }
     }
 }

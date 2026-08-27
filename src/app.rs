@@ -3025,6 +3025,11 @@ impl ReplayForge {
                                 AppTheme::NightOps,
                                 AppTheme::NightOps.label(),
                             );
+                            ui.selectable_value(
+                                &mut theme_choice,
+                                AppTheme::Pirate,
+                                AppTheme::Pirate.label(),
+                            );
                         });
                 });
                 if theme_choice != self.config.theme {

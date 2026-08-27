@@ -1,4 +1,4 @@
-//! Shared UI colors and egui theme chrome (Classic, ArmA 3, Night Ops).
+//! Shared UI colors and egui theme chrome (Classic, ArmA 3, Night Ops, Pirate).
 use crate::config::AppTheme;
 use eframe::egui::{
     Align2, Button, Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
@@ -35,7 +35,10 @@ struct ThemeTokens {
 }
 
 fn uses_flat_chrome(style: AppTheme) -> bool {
-    matches!(style, AppTheme::Arma3 | AppTheme::NightOps)
+    matches!(
+        style,
+        AppTheme::Arma3 | AppTheme::NightOps | AppTheme::Pirate
+    )
 }
 
 fn classic_tokens() -> ThemeTokens {
@@ -119,6 +122,33 @@ fn night_ops_tokens() -> ThemeTokens {
     }
 }
 
+fn pirate_tokens() -> ThemeTokens {
+    ThemeTokens {
+        style: AppTheme::Pirate,
+        corner_radius: 3.0,
+        accent: Color32::from_rgb(196, 163, 90),
+        accent_bright: Color32::from_rgb(220, 190, 120),
+        surface: Color32::from_rgb(36, 30, 24),
+        surface_track: Color32::from_rgb(44, 38, 30),
+        surface_dim: Color32::from_rgba_unmultiplied(14, 12, 10, 200),
+        keep_tint: Color32::from_rgba_unmultiplied(196, 163, 90, 28),
+        text_primary: Color32::from_rgb(232, 224, 208),
+        text_muted: Color32::from_rgb(150, 140, 120),
+        text_muted_light: Color32::from_rgb(170, 160, 140),
+        error: Color32::from_rgb(180, 60, 50),
+        button_disabled: Color32::from_rgb(50, 44, 36),
+        status_running: Color32::from_rgb(200, 192, 176),
+        success: Color32::from_rgb(90, 140, 110),
+        stroke_subtle: Color32::from_rgb(64, 56, 44),
+        panel_fill: Color32::from_rgb(26, 22, 18),
+        extreme_bg: Color32::from_rgb(18, 16, 12),
+        hover_fill: Color32::from_rgb(48, 40, 32),
+        active_fill: Color32::from_rgb(52, 44, 36),
+        noninteractive_bg: Color32::from_rgb(30, 26, 20),
+        selection_bg: Color32::from_rgba_unmultiplied(196, 163, 90, 55),
+    }
+}
+
 fn set_theme(theme: AppTheme) {
     if let Ok(mut guard) = ACTIVE.lock() {
         *guard = theme;
@@ -131,6 +161,7 @@ fn tokens() -> ThemeTokens {
         AppTheme::Classic => classic_tokens(),
         AppTheme::Arma3 => arma3_tokens(),
         AppTheme::NightOps => night_ops_tokens(),
+        AppTheme::Pirate => pirate_tokens(),
     }
 }
 
@@ -217,11 +248,7 @@ pub fn home_section_frame(running: bool) -> Frame {
             .inner_margin(Margin::same(24))
             .stroke(Stroke::new(
                 1.0_f32,
-                if running {
-                    t.accent
-                } else {
-                    t.stroke_subtle
-                },
+                if running { t.accent } else { t.stroke_subtle },
             ));
     }
 
@@ -294,7 +321,9 @@ pub fn primary_button(text: &str) -> Button<'static> {
             .stroke(Stroke::new(1.0_f32, t.stroke_subtle))
             .corner_radius(t.corner_radius)
     } else {
-        Button::new(text).fill(t.accent).corner_radius(t.corner_radius)
+        Button::new(text)
+            .fill(t.accent)
+            .corner_radius(t.corner_radius)
     }
 }
 
