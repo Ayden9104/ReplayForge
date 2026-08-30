@@ -2,7 +2,7 @@ use crate::detect::clip_duration_secs;
 use crate::host::host_command;
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 const MIN_TRIM_SECS: f64 = 0.5;
@@ -317,14 +317,50 @@ pub fn generate_clip_thumbnail(path: &Path) -> Result<(), String> {
     }
 }
 
-/// Trim a saved clip in place: keep `[start_secs, end_secs)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrimSaveMode {
+    ReplaceOriginal,
+    SaveCopy,
+}
+
+const MAX_TRIM_COPY_SUFFIX: u32 = 999;
+
+/// Unique `{stem}_trim.mp4` path in the same folder as `source`.
+pub fn unique_trim_copy_path(source: &Path) -> Result<PathBuf, String> {
+    let parent = source
+        .parent()
+        .ok_or_else(|| "Clip has no parent directory".to_string())?;
+    let stem = source
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "Invalid clip filename".to_string())?;
+
+    let first = parent.join(format!("{stem}_trim.mp4"));
+    if !first.exists() {
+        return Ok(first);
+    }
+
+    for n in 2..=MAX_TRIM_COPY_SUFFIX {
+        let candidate = parent.join(format!("{stem}_trim_{n}.mp4"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!(
+        "Too many trim copies for {stem} (max {MAX_TRIM_COPY_SUFFIX})"
+    ))
+}
+
+/// Trim a clip: keep `[start_secs, end_secs)` and write to original or a new copy path.
 pub fn trim_clip(
     path: &Path,
     start_secs: f64,
     end_secs: f64,
     audio_gain: f32,
     compress: TrimCompressPreset,
-) -> Result<(), String> {
+    mode: TrimSaveMode,
+) -> Result<PathBuf, String> {
     let path_buf = path.to_path_buf();
     let Some(duration) = clip_duration_secs(&path_buf) else {
         return Err("Could not read clip duration (is ffprobe installed?)".into());
@@ -462,11 +498,17 @@ pub fn trim_clip(
         return Err("Trim produced no output file".into());
     }
 
-    fs::rename(&temp, path).map_err(|e| format!("Failed to replace clip: {e}"))?;
+    let output_path = match mode {
+        TrimSaveMode::ReplaceOriginal => path.to_path_buf(),
+        TrimSaveMode::SaveCopy => unique_trim_copy_path(path)?,
+    };
 
-    if let Err(error) = generate_clip_thumbnail(path) {
+    fs::rename(&temp, &output_path)
+        .map_err(|e| format!("Failed to finalize trim output: {e}"))?;
+
+    if let Err(error) = generate_clip_thumbnail(&output_path) {
         eprintln!("{error}");
     }
 
-    Ok(())
+    Ok(output_path)
 }

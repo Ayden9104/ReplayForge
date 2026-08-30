@@ -1,7 +1,7 @@
 //! ReplayForge egui application shell (home, clips, settings, hotkeys).
 use crate::clips::{
     extract_filmstrip_jpeg, extract_frame_png, extract_waveform_peaks, filmstrip_frame_count,
-    trim_clip, waveform_peak_count, TrimCompressPreset,
+    trim_clip, waveform_peak_count, TrimCompressPreset, TrimSaveMode,
 };
 use crate::config::{
     AppTheme, Backend, Config, SystemAudioMode, codec_choices, hotkey_choices, path_display,
@@ -1280,7 +1280,7 @@ impl ReplayForge {
         interacted
     }
 
-    fn apply_trim(&mut self) {
+    fn start_trim_job(&mut self, mode: TrimSaveMode) {
         if self.trimming {
             self.toast("Trim already in progress…");
             return;
@@ -1302,7 +1302,10 @@ impl ReplayForge {
         }
 
         self.trimming = true;
-        self.toast("Trimming clip…");
+        self.toast(match mode {
+            TrimSaveMode::ReplaceOriginal => "Trimming clip…",
+            TrimSaveMode::SaveCopy => "Saving trim copy…",
+        });
 
         let path = state.path.clone();
         let start = state.start_secs;
@@ -1313,9 +1316,17 @@ impl ReplayForge {
         self.trim_rx = Some(rx);
 
         thread::spawn(move || {
-            let result = trim_clip(&path, start, end, audio_gain, compress).map(|()| path);
+            let result = trim_clip(&path, start, end, audio_gain, compress, mode);
             let _ = tx.send(result);
         });
+    }
+
+    fn apply_trim(&mut self) {
+        self.start_trim_job(TrimSaveMode::ReplaceOriginal);
+    }
+
+    fn save_trim_copy(&mut self) {
+        self.start_trim_job(TrimSaveMode::SaveCopy);
     }
 
     fn poll_trim_result(&mut self) {
@@ -1334,8 +1345,19 @@ impl ReplayForge {
                             .and_then(|n| n.to_str())
                             .unwrap_or("clip")
                             .to_string();
-                        self.toast(format!("{} — {name}", chill_toast(ChillKind::Trim)));
-                        notify_desktop("Clip trimmed", &name);
+                        let saved_copy = self
+                            .trim
+                            .as_ref()
+                            .is_some_and(|state| state.path != path);
+                        if saved_copy {
+                            self.toast(format!("Saved copy — {name}"));
+                            notify_desktop("Trim copy saved", &name);
+                            self.clip_focus = Some(path.clone());
+                            self.clip_focus_scroll_pending = true;
+                        } else {
+                            self.toast(format!("{} — {name}", chill_toast(ChillKind::Trim)));
+                            notify_desktop("Clip trimmed", &name);
+                        }
                         self.trim = None;
                         self.clear_trim_previews();
                         self.page = Page::Clips;
@@ -3425,6 +3447,7 @@ impl ReplayForge {
         };
 
         let mut apply = false;
+        let mut save_copy = false;
         let mut back = false;
         let mut play_clicked = false;
         let mut nudge: Option<f64> = None;
@@ -3497,12 +3520,25 @@ impl ReplayForge {
                         let can_apply = range_valid && !self.trimming && !self.saving;
                         if ui
                             .add_enabled(can_apply, theme::primary_button("Apply trim"))
+                            .on_hover_text("Replace this clip with the trimmed selection")
                             .clicked()
                         {
                             apply = true;
                         }
+                        if ui
+                            .add_enabled(can_apply, theme::secondary_button("Save copy"))
+                            .on_hover_text("Keep the original and save the trim as a new clip")
+                            .clicked()
+                        {
+                            save_copy = true;
+                        }
                     });
                 });
+                ui.label(
+                    egui::RichText::new("Save copy keeps the original clip.")
+                        .color(theme::text_muted())
+                        .size(11.0),
+                );
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -3741,6 +3777,8 @@ impl ReplayForge {
             self.cancel_trim();
         } else if apply {
             self.apply_trim();
+        } else if save_copy {
+            self.save_trim_copy();
         }
     }
 }
