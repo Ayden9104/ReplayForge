@@ -1,7 +1,7 @@
 //! ReplayForge egui application shell (home, clips, settings, hotkeys).
 use crate::clips::{
     extract_filmstrip_jpeg, extract_frame_png, extract_waveform_peaks, filmstrip_frame_count,
-    trim_clip, waveform_peak_count,
+    trim_clip, waveform_peak_count, TrimCompressPreset,
 };
 use crate::config::{
     AppTheme, Backend, Config, SystemAudioMode, codec_choices, hotkey_choices, path_display,
@@ -68,6 +68,8 @@ struct TrimState {
     start_secs: f64,
     end_secs: f64,
     preview_secs: f64,
+    audio_gain: f32,
+    compress: TrimCompressPreset,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -127,7 +129,6 @@ pub struct ReplayForge {
     trim_waveform_rx: Option<Receiver<Result<Vec<f32>, String>>>,
     trim_waveform_pending: bool,
     trim_muted: bool,
-    trim_volume: f32,
     trim_audio_error: Option<String>,
     clip_meta_tx: Sender<(PathBuf, (String, String))>,
     clip_meta_rx: Receiver<(PathBuf, (String, String))>,
@@ -239,7 +240,6 @@ impl ReplayForge {
             trim_waveform_rx: None,
             trim_waveform_pending: false,
             trim_muted: false,
-            trim_volume: 1.0,
             trim_audio_error: None,
             clip_meta_tx,
             clip_meta_rx,
@@ -675,6 +675,8 @@ impl ReplayForge {
             start_secs: 0.0,
             end_secs: duration,
             preview_secs: 0.0,
+            audio_gain: 1.0,
+            compress: TrimCompressPreset::Off,
         });
         self.trim_preview_last_request = Instant::now() - Duration::from_millis(200);
         self.trim_preview_error = None;
@@ -728,11 +730,7 @@ impl ReplayForge {
     }
 
     fn trim_effective_volume(&self) -> f32 {
-        if self.trim_muted {
-            0.0
-        } else {
-            self.trim_volume.clamp(0.0, 1.0)
-        }
+        if self.trim_muted { 0.0 } else { 1.0 }
     }
 
     fn apply_trim_volume(&self) {
@@ -821,7 +819,13 @@ impl ReplayForge {
             return;
         }
 
-        match TrimPlayback::start(&state.path, play_from, state.end_secs) {
+        match TrimPlayback::start(
+            &state.path,
+            play_from,
+            state.end_secs,
+            state.audio_gain,
+            state.compress,
+        ) {
             Ok(playback) => {
                 if !playback.audio_enabled {
                     let reason = playback
@@ -1303,11 +1307,13 @@ impl ReplayForge {
         let path = state.path.clone();
         let start = state.start_secs;
         let end = state.end_secs;
+        let audio_gain = state.audio_gain;
+        let compress = state.compress;
         let (tx, rx) = mpsc::channel();
         self.trim_rx = Some(rx);
 
         thread::spawn(move || {
-            let result = trim_clip(&path, start, end).map(|()| path);
+            let result = trim_clip(&path, start, end, audio_gain, compress).map(|()| path);
             let _ = tx.send(result);
         });
     }
@@ -3596,21 +3602,78 @@ impl ReplayForge {
                             }
                             ui.add_space(8.0);
                             ui.label(
-                                egui::RichText::new("Vol")
+                                egui::RichText::new("Gain")
                                     .color(theme::text_muted())
                                     .size(12.0),
                             );
-                            let vol_slider = ui.add(
-                                egui::Slider::new(&mut self.trim_volume, 0.0..=1.0)
-                                    .show_value(false),
+                            let gain_slider = ui.add(
+                                egui::Slider::new(&mut state.audio_gain, 0.0..=2.0)
+                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
                             );
-                            if vol_slider.changed() {
-                                if self.trim_volume > 0.0 {
+                            if gain_slider.changed() {
+                                if state.audio_gain > 0.0 {
                                     self.trim_muted = false;
                                 }
-                                self.apply_trim_volume();
+                                if self.trim_is_playing() {
+                                    self.stop_trim_playback();
+                                }
+                            }
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new("Compress")
+                                    .color(theme::text_muted())
+                                    .size(12.0),
+                            );
+                            let compress_label = match state.compress {
+                                TrimCompressPreset::Off => "Off",
+                                TrimCompressPreset::Light => "Light",
+                                TrimCompressPreset::Strong => "Strong",
+                            };
+                            let mut compress_changed = false;
+                            egui::ComboBox::from_id_salt("trim_compress")
+                                .selected_text(compress_label)
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_value(
+                                            &mut state.compress,
+                                            TrimCompressPreset::Off,
+                                            "Off",
+                                        )
+                                        .changed()
+                                    {
+                                        compress_changed = true;
+                                    }
+                                    if ui
+                                        .selectable_value(
+                                            &mut state.compress,
+                                            TrimCompressPreset::Light,
+                                            "Light",
+                                        )
+                                        .changed()
+                                    {
+                                        compress_changed = true;
+                                    }
+                                    if ui
+                                        .selectable_value(
+                                            &mut state.compress,
+                                            TrimCompressPreset::Strong,
+                                            "Strong",
+                                        )
+                                        .changed()
+                                    {
+                                        compress_changed = true;
+                                    }
+                                });
+                            if compress_changed && self.trim_is_playing() {
+                                self.stop_trim_playback();
                             }
                         });
+
+                        ui.label(
+                            egui::RichText::new("Applied on export")
+                                .color(theme::text_muted())
+                                .size(11.0),
+                        );
 
                         if self.trim_audio_error.is_some() {
                             ui.add_space(4.0);
