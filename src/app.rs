@@ -2398,7 +2398,9 @@ impl ReplayForge {
                                             if ui.add(theme::primary_button("Trim")).clicked() {
                                                 start_trim_req = Some(clip_path.clone());
                                             }
-                                        } else if has_live_share {
+                                        }
+
+                                        if has_live_share {
                                             let copy_flash_active = self
                                                 .copy_flash
                                                 .as_ref()
@@ -2416,11 +2418,22 @@ impl ReplayForge {
                                             {
                                                 self.copy_flash = None;
                                             }
-                                            let copy_btn = if copy_flash_active {
-                                                theme::primary_button("Copied")
-                                                    .fill(theme::success())
+                                            let copy_label = if copy_flash_active {
+                                                "Copied"
                                             } else {
-                                                theme::primary_button("Copy link")
+                                                "Copy link"
+                                            };
+                                            let copy_btn = if copy_flash_active {
+                                                (if focused {
+                                                    theme::secondary_button(copy_label)
+                                                } else {
+                                                    theme::primary_button(copy_label)
+                                                })
+                                                .fill(theme::success())
+                                            } else if focused {
+                                                theme::secondary_button(copy_label)
+                                            } else {
+                                                theme::primary_button(copy_label)
                                             };
                                             if ui
                                                 .add_enabled(!self.sharing, copy_btn)
@@ -2431,21 +2444,26 @@ impl ReplayForge {
                                             {
                                                 share_copy_req = Some(clip_path.clone());
                                             }
-                                        } else if ui
-                                            .add_enabled(
-                                                !self.sharing,
-                                                theme::primary_button(if self.sharing {
-                                                    "Sharing…"
-                                                } else {
-                                                    "Create link"
-                                                }),
-                                            )
-                                            .on_hover_text(
-                                                "Upload to ReplayForge cloud and copy link",
-                                            )
-                                            .clicked()
-                                        {
-                                            share_create_req = Some(clip_path.clone());
+                                        } else {
+                                            let create_label = if self.sharing {
+                                                "Sharing…"
+                                            } else {
+                                                "Create link"
+                                            };
+                                            let create_btn = if focused {
+                                                theme::secondary_button(create_label)
+                                            } else {
+                                                theme::primary_button(create_label)
+                                            };
+                                            if ui
+                                                .add_enabled(!self.sharing, create_btn)
+                                                .on_hover_text(
+                                                    "Upload to ReplayForge cloud and copy link",
+                                                )
+                                                .clicked()
+                                            {
+                                                share_create_req = Some(clip_path.clone());
+                                            }
                                         }
 
                                         if ui
@@ -2485,6 +2503,24 @@ impl ReplayForge {
                                                 .clicked()
                                             {
                                                 copy_path_req = Some(clip_path.clone());
+                                                ui.close();
+                                            }
+                                            if !has_live_share
+                                                && ui
+                                                    .add_enabled(
+                                                        !self.sharing,
+                                                        egui::Button::new(if self.sharing {
+                                                            "Sharing…"
+                                                        } else {
+                                                            "Create link"
+                                                        }),
+                                                    )
+                                                    .on_hover_text(
+                                                        "Upload to ReplayForge cloud and copy link",
+                                                    )
+                                                    .clicked()
+                                            {
+                                                share_create_req = Some(clip_path.clone());
                                                 ui.close();
                                             }
                                             if has_live_share
