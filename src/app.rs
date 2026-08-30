@@ -137,6 +137,8 @@ pub struct ReplayForge {
     clip_thumb_inflight: HashSet<PathBuf>,
     /// Newest saved clip to highlight / scroll to in the library.
     clip_focus: Option<PathBuf>,
+    /// Scroll to `clip_focus` once on the next Clips render.
+    clip_focus_scroll_pending: bool,
     /// Set when StatusNotifier tray creation fails (Bazzite/session without SNI).
     tray_unavailable_reason: Option<String>,
     /// When the first tray create failed (for scheduled retries).
@@ -246,6 +248,7 @@ impl ReplayForge {
             clip_thumb_rx,
             clip_thumb_inflight: HashSet::new(),
             clip_focus: None,
+            clip_focus_scroll_pending: false,
             tray_unavailable_reason,
             tray_fail_at,
             tray_retry_index,
@@ -437,6 +440,7 @@ impl ReplayForge {
                         self.clips_dirty = true;
                         self.clear_clip_caches();
                         self.clip_focus = Some(path.clone());
+                        self.clip_focus_scroll_pending = true;
                         if self.config.open_trim_after_save {
                             self.open_trim(path);
                         } else {
@@ -1703,8 +1707,8 @@ impl ReplayForge {
                 ui.ctx().request_repaint_after(Duration::from_millis(33));
                 ui.horizontal(|ui| {
                     let t = ui.input(|i| i.time);
-                    let pulse = 0.45
-                        + 0.55 * (0.5 + 0.5 * (t * std::f64::consts::TAU * 1.1).sin()) as f32;
+                    let pulse =
+                        0.45 + 0.55 * (0.5 + 0.5 * (t * std::f64::consts::TAU * 1.1).sin()) as f32;
                     let base = theme::status_running();
                     let status_color = egui::Color32::from_rgba_unmultiplied(
                         base.r(),
@@ -1938,7 +1942,7 @@ impl ReplayForge {
         }
         if let Some(path) = last_clip {
             if open_last {
-                open_path(&path);
+                let _ = open_path(&path);
             }
             if trim_last {
                 self.open_trim(path.clone());
@@ -2140,7 +2144,7 @@ impl ReplayForge {
                 }
                 if ui.add(theme::secondary_button("Open Folder")).clicked() {
                     let _ = self.config.ensure_output_dir();
-                    open_path(&self.config.output_dir);
+                    let _ = open_path(&self.config.output_dir);
                 }
                 ui.add_space(12.0);
                 ui.label(egui::RichText::new("Sort").color(theme::text_muted()));
@@ -2206,7 +2210,10 @@ impl ReplayForge {
         let mut finish_rename: Option<(PathBuf, String)> = None;
         let mut cancel_rename = false;
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             let gap = 16.0;
             let min_card_outer = 300.0;
             // Matches theme::card_frame() Margin::same(14) on left+right.
@@ -2253,12 +2260,14 @@ impl ReplayForge {
 
                                 if has_texture {
                                     if let Some(texture) = self.textures.get(&thumbnail_path) {
-                                        let response = ui.add(
-                                            egui::Image::new(texture)
-                                                .fit_to_exact_size(egui::vec2(thumb_w, thumb_h))
-                                                .corner_radius(6.0),
-                                        );
-                                        if response.clicked() {
+                                        let response = ui
+                                            .add(
+                                                egui::Image::new(texture)
+                                                    .fit_to_exact_size(egui::vec2(thumb_w, thumb_h))
+                                                    .corner_radius(6.0),
+                                            )
+                                            .on_hover_text("Open in default app");
+                                        if response.clicked() || response.double_clicked() {
                                             open_path_req = Some(clip_path.clone());
                                         }
                                         if ui.is_rect_visible(response.rect)
@@ -2272,6 +2281,8 @@ impl ReplayForge {
                                         egui::vec2(thumb_w, thumb_h),
                                         egui::Sense::click(),
                                     );
+                                    let thumb_response =
+                                        thumb_response.on_hover_text("Open in default app");
                                     ui.painter().rect_filled(
                                         thumb_rect,
                                         6.0,
@@ -2293,8 +2304,15 @@ impl ReplayForge {
                                         egui::FontId::proportional(13.0),
                                         theme::text_muted(),
                                     );
-                                    if thumb_response.clicked() && thumb_exists {
+                                    if thumb_response.clicked() || thumb_response.double_clicked() {
                                         open_path_req = Some(clip_path.clone());
+                                    }
+                                    if !has_texture && thumb_exists {
+                                        ui.label(
+                                            egui::RichText::new("Click Open to play")
+                                                .color(theme::text_muted())
+                                                .size(11.0),
+                                        );
                                     }
                                     let visible = ui.is_rect_visible(thumb_rect);
                                     if visible && thumb_exists {
@@ -2402,6 +2420,14 @@ impl ReplayForge {
                                             share_create_req = Some(clip_path.clone());
                                         }
 
+                                        if ui
+                                            .add(theme::secondary_button("Open"))
+                                            .on_hover_text("Open in default app")
+                                            .clicked()
+                                        {
+                                            open_path_req = Some(clip_path.clone());
+                                        }
+
                                         ui.menu_button("⋯", |ui| {
                                             if ui.button("Open").clicked() {
                                                 open_path_req = Some(clip_path.clone());
@@ -2470,10 +2496,11 @@ impl ReplayForge {
                             });
                         });
 
-                        if focused {
+                        if focused && self.clip_focus_scroll_pending {
                             card_response
                                 .response
                                 .scroll_to_me(Some(egui::Align::Center));
+                            self.clip_focus_scroll_pending = false;
                         }
 
                         if (index + 1) % columns == 0 {
@@ -2488,7 +2515,9 @@ impl ReplayForge {
         });
 
         if let Some(path) = open_path_req {
-            open_path(&path);
+            if open_path(&path).is_err() {
+                self.toast("Could not open clip");
+            }
         }
 
         if let Some(path) = copy_path_req {

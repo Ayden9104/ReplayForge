@@ -39,11 +39,12 @@ pub fn host_output(program: &str, args: &[&str]) -> std::io::Result<Output> {
         .output()
 }
 
-pub fn open_path(path: &Path) {
+pub fn open_path(path: &Path) -> Result<(), String> {
     let path_str = path.to_string_lossy();
-    if let Err(error) = host_command("xdg-open", &[&path_str]).spawn() {
-        eprintln!("Failed to open {}: {error}", path.display());
-    }
+    host_command("xdg-open", &[&path_str])
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Failed to open {}: {error}", path.display()))
 }
 
 pub fn open_url(url: &str) {
@@ -60,9 +61,9 @@ pub fn open_url(url: &str) {
 /// Open the file manager at the clip's parent folder (best-effort).
 pub fn reveal_in_file_manager(path: &Path) {
     if let Some(parent) = path.parent().filter(|p| p.as_os_str().len() > 0) {
-        open_path(parent);
+        let _ = open_path(parent);
     } else {
-        open_path(path);
+        let _ = open_path(path);
     }
 }
 
