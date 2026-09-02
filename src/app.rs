@@ -2916,24 +2916,17 @@ impl ReplayForge {
                 }
 
                 ui.add_enabled_ui(self.config.capture_microphone, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Mic volume");
-                        let slider = ui
-                            .add(
-                                egui::Slider::new(&mut self.config.mic_volume, 0.0..=1.0)
-                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                            )
-                            .on_hover_text(
-                                "Adjusts the default mic level in PipeWire before capture. \
-                                 May also affect other apps using the same mic.",
-                            );
-                        if slider.changed() {
-                            for error in apply_config_volumes(&self.config) {
-                                self.toast(error);
-                            }
-                            self.persist_config();
+                    ui.label("Mic volume");
+                    let slider = theme::volume_slider(ui, &mut self.config.mic_volume).on_hover_text(
+                        "Adjusts the default mic level in PipeWire before capture. \
+                         May also affect other apps using the same mic.",
+                    );
+                    if slider.changed() {
+                        for error in apply_config_volumes(&self.config) {
+                            self.toast(error);
                         }
-                    });
+                        self.persist_config();
+                    }
                 });
 
                 ui.add_enabled_ui(self.config.capture_system_audio, |ui| {
@@ -2964,27 +2957,21 @@ impl ReplayForge {
                     let desktop_volume_enabled =
                         self.config.system_audio_mode == SystemAudioMode::All;
                     ui.add_enabled_ui(desktop_volume_enabled, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Desktop audio volume");
-                            let slider = ui
-                                .add(
-                                    egui::Slider::new(
-                                        &mut self.config.desktop_audio_volume,
-                                        0.0..=1.0,
-                                    )
-                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                                )
-                                .on_hover_text(
-                                    "Adjusts the default output monitor level in PipeWire before capture. \
-                                     May also affect desktop audio heard by other apps.",
-                                );
-                            if slider.changed() {
-                                for error in apply_config_volumes(&self.config) {
-                                    self.toast(error);
-                                }
-                                self.persist_config();
+                        ui.label("Desktop audio volume");
+                        let slider = theme::volume_slider(
+                            ui,
+                            &mut self.config.desktop_audio_volume,
+                        )
+                        .on_hover_text(
+                            "Adjusts the default output monitor level in PipeWire before capture. \
+                             May also affect desktop audio heard by other apps.",
+                        );
+                        if slider.changed() {
+                            for error in apply_config_volumes(&self.config) {
+                                self.toast(error);
                             }
-                        });
+                            self.persist_config();
+                        }
                     });
                     if !desktop_volume_enabled {
                         ui.label(

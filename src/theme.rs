@@ -2,7 +2,8 @@
 use crate::config::AppTheme;
 use eframe::egui::{
     Align2, Button, Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
-    Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Visuals, vec2,
+    Frame, Margin, Pos2, Rect, Response, RichText, Sense, Slider, Stroke, StrokeKind, Ui, Visuals,
+    vec2,
 };
 use std::sync::Mutex;
 
@@ -383,6 +384,18 @@ pub fn secondary_button(text: &str) -> Button<'static> {
     }
 }
 
+/// Full-width 0–100% slider for capture volume controls in Settings.
+pub fn volume_slider(ui: &mut Ui, value: &mut f32) -> Response {
+    let width = ui.available_width().max(180.0);
+    ui.add_sized(
+        [width, 22.0],
+        Slider::new(value, 0.0..=1.0)
+            .show_value(true)
+            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+            .trailing_fill(true),
+    )
+}
+
 pub fn nav_item(ui: &mut Ui, label: &str, selected: bool) -> bool {
     let t = tokens();
     let width = ui.available_width();
@@ -522,7 +535,8 @@ pub fn apply_theme(ctx: &Context, theme: AppTheme) {
     visuals.widgets.inactive.corner_radius = radius;
     visuals.widgets.active.corner_radius = radius;
     visuals.widgets.hovered.corner_radius = radius;
-    visuals.widgets.inactive.bg_fill = t.surface;
+    visuals.widgets.inactive.bg_fill = t.surface_track;
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, t.stroke_subtle);
     visuals.widgets.hovered.bg_fill = t.hover_fill;
     visuals.widgets.active.bg_fill = if uses_flat_chrome(theme) {
         t.active_fill
