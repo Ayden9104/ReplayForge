@@ -1,4 +1,5 @@
 mod app;
+mod audio_volume;
 mod clips;
 mod config;
 mod detect;

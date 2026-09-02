@@ -1,4 +1,3 @@
-use crate::clips::{build_trim_audio_filter, TrimCompressPreset};
 use crate::host::host_command;
 use rodio::source::Source;
 use rodio::{OutputStream, Sink};
@@ -37,13 +36,7 @@ pub struct TrimPlayback {
 
 impl TrimPlayback {
     /// Play `[start_secs, end_secs)` from `path` (caller clamps playhead into the keep range).
-    pub fn start(
-        path: &Path,
-        start_secs: f64,
-        end_secs: f64,
-        audio_gain: f32,
-        compress: TrimCompressPreset,
-    ) -> Result<Self, String> {
+    pub fn start(path: &Path, start_secs: f64, end_secs: f64) -> Result<Self, String> {
         if end_secs <= start_secs {
             return Err("Invalid play range".into());
         }
@@ -75,8 +68,6 @@ impl TrimPlayback {
             path_str.to_string(),
             start,
             duration,
-            audio_gain,
-            compress,
         );
 
         let handle = TrimPlaybackHandle {
@@ -260,12 +251,10 @@ fn setup_audio_playback(
     path: String,
     start: String,
     duration: String,
-    audio_gain: f32,
-    compress: TrimCompressPreset,
 ) -> (Option<OutputStream>, Option<Sink>, bool, Option<String>) {
     let (pcm_tx, pcm_rx) = mpsc::sync_channel::<Vec<f32>>(64);
 
-    let mut ffmpeg_args = vec![
+    let ffmpeg_args = vec![
         "-nostdin",
         "-loglevel",
         "error",
@@ -280,13 +269,10 @@ fn setup_audio_playback(
         "2",
         "-ar",
         "48000",
+        "-f",
+        "f32le",
+        "-",
     ];
-    let audio_filter = build_trim_audio_filter(audio_gain, compress);
-    if let Some(af) = &audio_filter {
-        ffmpeg_args.push("-af");
-        ffmpeg_args.push(af);
-    }
-    ffmpeg_args.extend(["-f", "f32le", "-"]);
 
     let mut child = match host_command("ffmpeg", &ffmpeg_args)
     .stdout(Stdio::piped())

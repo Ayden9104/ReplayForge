@@ -1,7 +1,8 @@
 //! ReplayForge egui application shell (home, clips, settings, hotkeys).
+use crate::audio_volume::apply_config_volumes;
 use crate::clips::{
     extract_filmstrip_jpeg, extract_frame_png, extract_waveform_peaks, filmstrip_frame_count,
-    trim_clip, waveform_peak_count, TrimCompressPreset, TrimSaveMode,
+    trim_clip, waveform_peak_count, TrimSaveMode,
 };
 use crate::config::{
     AppTheme, Backend, Config, SystemAudioMode, codec_choices, hotkey_choices, path_display,
@@ -68,8 +69,6 @@ struct TrimState {
     start_secs: f64,
     end_secs: f64,
     preview_secs: f64,
-    audio_gain: f32,
-    compress: TrimCompressPreset,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -675,8 +674,6 @@ impl ReplayForge {
             start_secs: 0.0,
             end_secs: duration,
             preview_secs: 0.0,
-            audio_gain: 1.0,
-            compress: TrimCompressPreset::Off,
         });
         self.trim_preview_last_request = Instant::now() - Duration::from_millis(200);
         self.trim_preview_error = None;
@@ -819,13 +816,7 @@ impl ReplayForge {
             return;
         }
 
-        match TrimPlayback::start(
-            &state.path,
-            play_from,
-            state.end_secs,
-            state.audio_gain,
-            state.compress,
-        ) {
+        match TrimPlayback::start(&state.path, play_from, state.end_secs) {
             Ok(playback) => {
                 if !playback.audio_enabled {
                     let reason = playback
@@ -1310,13 +1301,11 @@ impl ReplayForge {
         let path = state.path.clone();
         let start = state.start_secs;
         let end = state.end_secs;
-        let audio_gain = state.audio_gain;
-        let compress = state.compress;
         let (tx, rx) = mpsc::channel();
         self.trim_rx = Some(rx);
 
         thread::spawn(move || {
-            let result = trim_clip(&path, start, end, audio_gain, compress, mode);
+            let result = trim_clip(&path, start, end, mode);
             let _ = tx.send(result);
         });
     }
@@ -2926,6 +2915,27 @@ impl ReplayForge {
                     self.apply_capture_settings();
                 }
 
+                ui.add_enabled_ui(self.config.capture_microphone, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Mic volume");
+                        let slider = ui
+                            .add(
+                                egui::Slider::new(&mut self.config.mic_volume, 0.0..=1.0)
+                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                            )
+                            .on_hover_text(
+                                "Adjusts the default mic level in PipeWire before capture. \
+                                 May also affect other apps using the same mic.",
+                            );
+                        if slider.changed() {
+                            for error in apply_config_volumes(&self.config) {
+                                self.toast(error);
+                            }
+                            self.persist_config();
+                        }
+                    });
+                });
+
                 ui.add_enabled_ui(self.config.capture_system_audio, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("System audio source");
@@ -2950,6 +2960,41 @@ impl ReplayForge {
                             self.apply_capture_settings();
                         }
                     });
+
+                    let desktop_volume_enabled =
+                        self.config.system_audio_mode == SystemAudioMode::All;
+                    ui.add_enabled_ui(desktop_volume_enabled, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Desktop audio volume");
+                            let slider = ui
+                                .add(
+                                    egui::Slider::new(
+                                        &mut self.config.desktop_audio_volume,
+                                        0.0..=1.0,
+                                    )
+                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                                )
+                                .on_hover_text(
+                                    "Adjusts the default output monitor level in PipeWire before capture. \
+                                     May also affect desktop audio heard by other apps.",
+                                );
+                            if slider.changed() {
+                                for error in apply_config_volumes(&self.config) {
+                                    self.toast(error);
+                                }
+                                self.persist_config();
+                            }
+                        });
+                    });
+                    if !desktop_volume_enabled {
+                        ui.label(
+                            egui::RichText::new(
+                                "Volume control applies to All system audio mode.",
+                            )
+                            .color(theme::text_muted())
+                            .size(12.0),
+                        );
+                    }
 
                     if self.config.system_audio_mode == SystemAudioMode::Apps {
                         ui.horizontal(|ui| {
@@ -3672,80 +3717,7 @@ impl ReplayForge {
                                 self.trim_muted = !self.trim_muted;
                                 self.apply_trim_volume();
                             }
-                            ui.add_space(8.0);
-                            ui.label(
-                                egui::RichText::new("Gain")
-                                    .color(theme::text_muted())
-                                    .size(12.0),
-                            );
-                            let gain_slider = ui.add(
-                                egui::Slider::new(&mut state.audio_gain, 0.0..=2.0)
-                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                            );
-                            if gain_slider.changed() {
-                                if state.audio_gain > 0.0 {
-                                    self.trim_muted = false;
-                                }
-                                if self.trim_is_playing() {
-                                    self.stop_trim_playback();
-                                }
-                            }
-                            ui.add_space(8.0);
-                            ui.label(
-                                egui::RichText::new("Compress")
-                                    .color(theme::text_muted())
-                                    .size(12.0),
-                            );
-                            let compress_label = match state.compress {
-                                TrimCompressPreset::Off => "Off",
-                                TrimCompressPreset::Light => "Light",
-                                TrimCompressPreset::Strong => "Strong",
-                            };
-                            let mut compress_changed = false;
-                            egui::ComboBox::from_id_salt("trim_compress")
-                                .selected_text(compress_label)
-                                .show_ui(ui, |ui| {
-                                    if ui
-                                        .selectable_value(
-                                            &mut state.compress,
-                                            TrimCompressPreset::Off,
-                                            "Off",
-                                        )
-                                        .changed()
-                                    {
-                                        compress_changed = true;
-                                    }
-                                    if ui
-                                        .selectable_value(
-                                            &mut state.compress,
-                                            TrimCompressPreset::Light,
-                                            "Light",
-                                        )
-                                        .changed()
-                                    {
-                                        compress_changed = true;
-                                    }
-                                    if ui
-                                        .selectable_value(
-                                            &mut state.compress,
-                                            TrimCompressPreset::Strong,
-                                            "Strong",
-                                        )
-                                        .changed()
-                                    {
-                                        compress_changed = true;
-                                    }
-                                });
-                            if compress_changed && self.trim_is_playing() {
-                                self.stop_trim_playback();
-                            }
                         });
-
-                        ui.label(
-                            egui::RichText::new("Applied on export")
-                                .color(theme::text_muted())
-                                .size(11.0),
-                        );
 
                         if self.trim_audio_error.is_some() {
                             ui.add_space(4.0);

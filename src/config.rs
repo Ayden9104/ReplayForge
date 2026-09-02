@@ -127,6 +127,12 @@ pub struct Config {
     /// App names for GSR `app:` sources (no `app:` prefix). Used when mode is `Apps`.
     #[serde(default)]
     pub audio_apps: Vec<String>,
+    /// 0.0–1.0 linear; applied to default mic source via PipeWire.
+    #[serde(default = "default_capture_volume")]
+    pub mic_volume: f32,
+    /// 0.0–1.0 linear; applied to default sink monitor (desktop capture).
+    #[serde(default = "default_capture_volume")]
+    pub desktop_audio_volume: f32,
     #[serde(default)]
     pub quality: QualityPreset,
     pub backend: Backend,
@@ -164,6 +170,10 @@ fn default_sfx_volume() -> f32 {
     1.0
 }
 
+fn default_capture_volume() -> f32 {
+    1.0
+}
+
 fn default_resolution() -> String {
     "native".to_string()
 }
@@ -188,6 +198,8 @@ impl Default for Config {
             capture_microphone: true,
             system_audio_mode: SystemAudioMode::All,
             audio_apps: Vec::new(),
+            mic_volume: default_capture_volume(),
+            desktop_audio_volume: default_capture_volume(),
             quality: QualityPreset::High,
             backend: Backend::Auto,
             autostart: false,

@@ -7,44 +7,6 @@ use std::process::Stdio;
 
 const MIN_TRIM_SECS: f64 = 0.5;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TrimCompressPreset {
-    #[default]
-    Off,
-    Light,
-    Strong,
-}
-
-/// ffmpeg `-af` chain for trim preview and export. `None` when gain is unity and compress is off.
-pub fn build_trim_audio_filter(gain: f32, compress: TrimCompressPreset) -> Option<String> {
-    let gain = gain.clamp(0.0, 2.0);
-    let mut parts = Vec::new();
-
-    if (gain - 1.0).abs() > 0.001 {
-        parts.push(format!("volume={gain:.3}"));
-    }
-
-    match compress {
-        TrimCompressPreset::Off => {}
-        TrimCompressPreset::Light => {
-            parts.push(
-                "acompressor=threshold=-20dB:ratio=2.5:attack=5:release=80:makeup=1".into(),
-            );
-        }
-        TrimCompressPreset::Strong => {
-            parts.push(
-                "acompressor=threshold=-24dB:ratio=4:attack=3:release=100:makeup=3".into(),
-            );
-        }
-    }
-
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(","))
-    }
-}
-
 fn run_ffmpeg_status(args: &[&str]) -> bool {
     host_command("ffmpeg", args)
         .stdout(Stdio::null())
@@ -357,8 +319,6 @@ pub fn trim_clip(
     path: &Path,
     start_secs: f64,
     end_secs: f64,
-    audio_gain: f32,
-    compress: TrimCompressPreset,
     mode: TrimSaveMode,
 ) -> Result<PathBuf, String> {
     let path_buf = path.to_path_buf();
@@ -399,71 +359,15 @@ pub fn trim_clip(
     let start = format!("{start_secs:.3}");
     let end = format!("{end_secs:.3}");
 
-    let audio_filter = build_trim_audio_filter(audio_gain, compress);
-    let mut ok = false;
-
-    if let Some(af) = &audio_filter {
-        ok = run_ffmpeg_status(&[
-            "-y",
-            "-ss",
-            &start,
-            "-to",
-            &end,
-            "-i",
-            &input,
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-af",
-            af,
-            &temp_str,
-        ]);
-        if !ok {
-            if temp.exists() {
-                let _ = fs::remove_file(&temp);
-            }
-            ok = run_ffmpeg_status(&[
-                "-y",
-                "-ss",
-                &start,
-                "-to",
-                &end,
-                "-i",
-                &input,
-                "-c:v",
-                "libx264",
-                "-preset",
-                "fast",
-                "-crf",
-                "18",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-                "-af",
-                af,
-                &temp_str,
-            ]);
-        }
-    }
+    let mut ok = run_ffmpeg_status(&[
+        "-y", "-ss", &start, "-to", &end, "-i", &input, "-c", "copy", &temp_str,
+    ]);
 
     if !ok {
         if temp.exists() {
             let _ = fs::remove_file(&temp);
         }
         ok = run_ffmpeg_status(&[
-            "-y", "-ss", &start, "-to", &end, "-i", &input, "-c", "copy", &temp_str,
-        ]);
-    }
-
-    if !ok {
-        if temp.exists() {
-            let _ = fs::remove_file(&temp);
-        }
-        let mut reencode_args = vec![
             "-y",
             "-ss",
             &start,
@@ -479,12 +383,8 @@ pub fn trim_clip(
             "18",
             "-c:a",
             "aac",
-        ];
-        if let Some(af) = &audio_filter {
-            reencode_args.extend(["-b:a", "192k", "-af", af]);
-        }
-        reencode_args.push(&temp_str);
-        ok = run_ffmpeg_status(&reencode_args);
+            &temp_str,
+        ]);
     }
 
     if !ok {

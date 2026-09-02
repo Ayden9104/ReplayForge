@@ -1,3 +1,4 @@
+use crate::audio_volume::apply_config_volumes;
 use crate::config::Config;
 use crate::detect::{FLATPAK_GSR_ID, ResolvedBackend};
 use crate::host::{host_command, host_output};
@@ -73,6 +74,10 @@ impl Recorder {
             self.last_error = Some(e.clone());
             e
         })?;
+
+        for error in apply_config_volumes(config) {
+            eprintln!("Capture volume: {error}");
+        }
 
         // Avoid stacking multiple GSR instances.
         let _ = signal_gsr("-INT");
