@@ -69,6 +69,7 @@ struct TrimState {
     start_secs: f64,
     end_secs: f64,
     preview_secs: f64,
+    audio_gain: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -674,6 +675,7 @@ impl ReplayForge {
             start_secs: 0.0,
             end_secs: duration,
             preview_secs: 0.0,
+            audio_gain: 1.0,
         });
         self.trim_preview_last_request = Instant::now() - Duration::from_millis(200);
         self.trim_preview_error = None;
@@ -816,7 +818,7 @@ impl ReplayForge {
             return;
         }
 
-        match TrimPlayback::start(&state.path, play_from, state.end_secs) {
+        match TrimPlayback::start(&state.path, play_from, state.end_secs, state.audio_gain) {
             Ok(playback) => {
                 if !playback.audio_enabled {
                     let reason = playback
@@ -1301,11 +1303,12 @@ impl ReplayForge {
         let path = state.path.clone();
         let start = state.start_secs;
         let end = state.end_secs;
+        let audio_gain = state.audio_gain;
         let (tx, rx) = mpsc::channel();
         self.trim_rx = Some(rx);
 
         thread::spawn(move || {
-            let result = trim_clip(&path, start, end, mode);
+            let result = trim_clip(&path, start, end, audio_gain, mode);
             let _ = tx.send(result);
         });
     }
@@ -3705,6 +3708,58 @@ impl ReplayForge {
                                 self.apply_trim_volume();
                             }
                         });
+
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Gain")
+                                    .color(theme::text_muted())
+                                    .size(12.0),
+                            );
+                            let gain_slider = ui.add(
+                                egui::Slider::new(&mut state.audio_gain, 0.0..=2.0)
+                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                                    .trailing_fill(true),
+                            );
+                            if gain_slider.changed() {
+                                if state.audio_gain > 0.0 {
+                                    self.trim_muted = false;
+                                }
+                                if self.trim_is_playing() {
+                                    self.stop_trim_playback();
+                                }
+                            }
+                        });
+                        ui.label(
+                            egui::RichText::new("Applied on export")
+                                .color(theme::text_muted())
+                                .size(11.0),
+                        );
+
+                        if self.config.capture_microphone {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Mic volume")
+                                        .color(theme::text_muted())
+                                        .size(12.0),
+                                );
+                                let slider = theme::volume_slider(ui, &mut self.config.mic_volume).on_hover_text(
+                                    "Adjusts the mic level in PipeWire for future recordings.",
+                                );
+                                if slider.changed() {
+                                    for error in apply_config_volumes(&self.config) {
+                                        self.toast(error);
+                                    }
+                                    self.persist_config();
+                                }
+                            });
+                            ui.label(
+                                egui::RichText::new("Affects future recordings (PipeWire)")
+                                    .color(theme::text_muted())
+                                    .size(11.0),
+                            );
+                        }
 
                         if self.trim_audio_error.is_some() {
                             ui.add_space(4.0);

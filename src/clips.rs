@@ -7,6 +7,16 @@ use std::process::Stdio;
 
 const MIN_TRIM_SECS: f64 = 0.5;
 
+/// Build an ffmpeg `-af` volume filter string when gain differs from unity.
+pub fn build_trim_volume_filter(gain: f32) -> Option<String> {
+    let gain = gain.clamp(0.0, 2.0);
+    if (gain - 1.0).abs() > 0.001 {
+        Some(format!("volume={gain:.3}"))
+    } else {
+        None
+    }
+}
+
 fn run_ffmpeg_status(args: &[&str]) -> bool {
     host_command("ffmpeg", args)
         .stdout(Stdio::null())
@@ -319,6 +329,7 @@ pub fn trim_clip(
     path: &Path,
     start_secs: f64,
     end_secs: f64,
+    audio_gain: f32,
     mode: TrimSaveMode,
 ) -> Result<PathBuf, String> {
     let path_buf = path.to_path_buf();
@@ -359,32 +370,50 @@ pub fn trim_clip(
     let start = format!("{start_secs:.3}");
     let end = format!("{end_secs:.3}");
 
-    let mut ok = run_ffmpeg_status(&[
-        "-y", "-ss", &start, "-to", &end, "-i", &input, "-c", "copy", &temp_str,
-    ]);
+    let audio_filter = build_trim_volume_filter(audio_gain);
+    let mut ok = false;
 
+    // If gain is non-unity, try re-encoding audio with the volume filter first.
+    if let Some(af) = &audio_filter {
+        ok = run_ffmpeg_status(&[
+            "-y", "-ss", &start, "-to", &end, "-i", &input, "-c:v", "copy", "-c:a", "aac",
+            "-b:a", "192k", "-af", af, &temp_str,
+        ]);
+        if !ok {
+            if temp.exists() {
+                let _ = fs::remove_file(&temp);
+            }
+            ok = run_ffmpeg_status(&[
+                "-y", "-ss", &start, "-to", &end, "-i", &input, "-c:v", "libx264", "-preset",
+                "fast", "-crf", "18", "-c:a", "aac", "-b:a", "192k", "-af", af, &temp_str,
+            ]);
+        }
+    }
+
+    // Stream copy (no gain adjustment needed or filter failed).
     if !ok {
         if temp.exists() {
             let _ = fs::remove_file(&temp);
         }
         ok = run_ffmpeg_status(&[
-            "-y",
-            "-ss",
-            &start,
-            "-to",
-            &end,
-            "-i",
-            &input,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "18",
-            "-c:a",
-            "aac",
-            &temp_str,
+            "-y", "-ss", &start, "-to", &end, "-i", &input, "-c", "copy", &temp_str,
         ]);
+    }
+
+    // Full re-encode fallback.
+    if !ok {
+        if temp.exists() {
+            let _ = fs::remove_file(&temp);
+        }
+        let mut reencode_args = vec![
+            "-y", "-ss", &start, "-to", &end, "-i", &input, "-c:v", "libx264", "-preset", "fast",
+            "-crf", "18", "-c:a", "aac",
+        ];
+        if let Some(af) = &audio_filter {
+            reencode_args.extend(["-b:a", "192k", "-af", af]);
+        }
+        reencode_args.push(&temp_str);
+        ok = run_ffmpeg_status(&reencode_args);
     }
 
     if !ok {
