@@ -2924,9 +2924,15 @@ impl ReplayForge {
                         "Adjusts the default mic level in PipeWire before capture. \
                          May also affect other apps using the same mic.",
                     );
-                    if slider.changed() {
-                        for error in apply_config_volumes(&self.config) {
-                            self.toast(error);
+                    if slider.drag_stopped() || slider.lost_focus() {
+                        let pct = (self.config.mic_volume * 100.0).round() as u32;
+                        let errors = apply_config_volumes(&self.config);
+                        if errors.is_empty() {
+                            self.toast(format!("Mic volume set to {pct}%"));
+                        } else {
+                            for error in errors {
+                                self.toast(error);
+                            }
                         }
                         self.persist_config();
                     }
@@ -2969,9 +2975,15 @@ impl ReplayForge {
                             "Adjusts the default output monitor level in PipeWire before capture. \
                              May also affect desktop audio heard by other apps.",
                         );
-                        if slider.changed() {
-                            for error in apply_config_volumes(&self.config) {
-                                self.toast(error);
+                        if slider.drag_stopped() || slider.lost_focus() {
+                            let pct = (self.config.desktop_audio_volume * 100.0).round() as u32;
+                            let errors = apply_config_volumes(&self.config);
+                            if errors.is_empty() {
+                                self.toast(format!("Desktop audio volume set to {pct}%"));
+                            } else {
+                                for error in errors {
+                                    self.toast(error);
+                                }
                             }
                             self.persist_config();
                         }
@@ -3747,9 +3759,15 @@ impl ReplayForge {
                                 let slider = theme::volume_slider(ui, &mut self.config.mic_volume).on_hover_text(
                                     "Adjusts the mic level in PipeWire for future recordings.",
                                 );
-                                if slider.changed() {
-                                    for error in apply_config_volumes(&self.config) {
-                                        self.toast(error);
+                                if slider.drag_stopped() || slider.lost_focus() {
+                                    let pct = (self.config.mic_volume * 100.0).round() as u32;
+                                    let errors = apply_config_volumes(&self.config);
+                                    if errors.is_empty() {
+                                        self.toast(format!("Mic volume set to {pct}%"));
+                                    } else {
+                                        for error in errors {
+                                            self.toast(error);
+                                        }
                                     }
                                     self.persist_config();
                                 }
